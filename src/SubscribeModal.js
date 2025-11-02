@@ -21,7 +21,12 @@ const daysOfWeekMap = [
   "Saturday",
   "Sunday",
 ];
-const daysOfMonth = Array.from({ length: 31 }, (_, i) => i + 1); // [1, 2, 3, ..., 31]
+const daysOfMonth = Array.from({ length: 31 }, (_, i) => i + 1).concat(
+  "Last day of the month"
+);
+
+console.log(daysOfMonth);
+// [1, 2, 3, ..., 31]
 
 const SubscribeModal = ({ onClose, mockData }) => {
   const [time, setTime] = useState("");
@@ -79,16 +84,15 @@ const SubscribeModal = ({ onClose, mockData }) => {
           </button>
         </div>
         <div className="modal-body">
-          {mockData?.schedule && (
-            <>
-              <p>
-                <strong>Description:</strong> {mockData.schedule.Description}
-              </p>
-              <p>
-                <strong>Created Date:</strong> {mockData.schedule.createdDate}
-              </p>
-            </>
-          )}
+          <label>
+            <strong>Subscription Date Time</strong>
+          </label>
+          <input
+            type="date"
+            value={mockData?.schedule?.createdDate || ""}
+            onChange={(e) => console.log(`Date updated to: ${e.target.value}`)} // Replace with your handler if needed
+            disabled
+          />
 
           <label>
             <strong>Time (UTC)</strong>
