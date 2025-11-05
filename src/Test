@@ -1,0 +1,1469 @@
+using Xunit;
+using Moq;
+using System;
+using System.IO;
+using System.Collections.Generic;
+
+public class ChunksRequestHandlerTests
+{
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _localized = new();
+    private readonly Mock<ISession> _session = new();
+    private readonly Mock<IParameterAccess> _parameterAccess = new();
+
+    private ChunksRequestHandler CreateHandler() =>
+        new ChunksRequestHandler(_logger.Object, _localized.Object, _session.Object, _parameterAccess.Object);
+
+    private AFRCreateChunkRequest CreateRequest(bool isResume, string content = "AA==")
+    {
+        return new AFRCreateChunkRequest
+        {
+            ChunkDetails = new ChunkDetails
+            {
+                ChunkId = 1,
+                ChunkContentBinary = content,
+                IsResume = isResume,
+                AttachmentGuid = Guid.NewGuid().ToString()
+            }
+        };
+    }
+
+    [Fact]
+    public void Handle_ResumeMode_ReturnsExistingChunks()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(tempDir);
+        File.WriteAllText(Path.Combine(tempDir, "1"), "data");
+
+        _parameterAccess.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(tempDir);
+
+        var handler = CreateHandler();
+        var req = CreateRequest(isResume: true);
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+        Assert.Single(((AFRCreateChunkResponse)resp.Result).ChunkIds);
+    }
+
+    [Fact]
+    public void Handle_UploadMode_WritesFileSuccessfully()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(tempDir);
+
+        _parameterAccess.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(tempDir);
+
+        var handler = CreateHandler();
+        var req = CreateRequest(isResume: false);
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+        Assert.True(((AFRCreateChunkResponse)resp.Result).IsChunkUploaded);
+    }
+
+    [Fact]
+    public void Handle_Exception_ReturnsFailure()
+    {
+        _parameterAccess.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new Exception("boom"));
+
+        var handler = CreateHandler();
+        var req = CreateRequest(false);
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.False(resp.Response.Success);
+        _logger.Verify(l => l.Critical(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+}
+---------------
+using Xunit;
+using Moq;
+using System;
+using System.IO;
+
+public class MergeChunksRequestHandlerTests
+{
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _localized = new();
+    private readonly Mock<ISession> _session = new();
+    private readonly Mock<IParameterAccess> _param = new();
+
+    private MergeChunksRequestHandler CreateHandler() =>
+        new MergeChunksRequestHandler(_logger.Object, _localized.Object, _session.Object, _param.Object);
+
+    private AFRCreateMergeChunkRequest CreateRequest(string dir)
+    {
+        return new AFRCreateMergeChunkRequest
+        {
+            MergeChunkDetails = new MergeChunkDetails
+            {
+                AttachmentGuid = Guid.NewGuid().ToString(),
+                AttachmentName = "mergedfile",
+                FileExtension = ".pdf"
+            }
+        };
+    }
+
+    [Fact]
+    public void Handle_MergeSuccess_ReturnsSuccess()
+    {
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir);
+
+        // Create two fake chunk files
+        File.WriteAllBytes(Path.Combine(chunkDir, "1"), new byte[] { 1, 2 });
+        File.WriteAllBytes(Path.Combine(chunkDir, "2"), new byte[] { 3, 4 });
+
+        string outputDir = chunkDir + "_out";
+        Directory.CreateDirectory(outputDir);
+
+        _param.Setup(x => x.GetParameterListItem("AFR", "Repository", "FrChunkRepositoryLocation"))
+            .Returns(chunkDir);
+
+        _param.Setup(x => x.GetParameterListItem("AFR", "Repository", "FrMergeRepositoryLocation"))
+            .Returns(outputDir);
+
+        var handler = CreateHandler();
+        var resp = handler.HandleMessage(new MessageHeader(), CreateRequest(chunkDir));
+
+        Assert.True(resp.Response.Success);
+    }
+
+    [Fact]
+    public void Handle_MergeFails_ReturnsFailure()
+    {
+        // Force exception from parameter access
+        _param.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new Exception("boom"));
+
+        var handler = CreateHandler();
+        var resp = handler.HandleMessage(new MessageHeader(), CreateRequest("x"));
+
+        Assert.False(resp.Response.Success);
+        _logger.Verify(l => l.Critical(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+}
+----------
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using Moq;
+using Xunit;
+using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
+
+// NOTE: update these usings to the correct namespaces in your project
+using Intergraph.MFR.ApprovalsCommandModule;
+
+public class AttachmentsRequestHandlerTests
+{
+    private readonly Mock<ILogger> _mockLogger = new();
+    private readonly Mock<ILocalizedStrings> _mockLocalized = new();
+    private readonly Mock<ISession> _mockSession = new();
+    private readonly Mock<IParameterAccess> _mockParameterAccess = new();
+
+    // Helper: create handler instance and inject a mocked MFRDataAccess into private field _afrDataAccess
+    private AttachmentsRequestHandler CreateHandlerAndInjectDataAccess(out Mock<MFRDataAccess> mockDataAccess)
+    {
+        var handler = new AttachmentsRequestHandler(
+            _mockLogger.Object,
+            _mockLocalized.Object,
+            _mockSession.Object,
+            _mockParameterAccess.Object);
+
+        mockDataAccess = new Mock<MFRDataAccess>(_mockParameterAccess.Object, _mockLogger.Object) { CallBase = false };
+
+        // Set up default behaviour to avoid nulls
+        mockDataAccess.Setup(m => m.GetAttachmentCopyStatusByReferenceId(It.IsAny<string>()))
+                      .Returns((ATTACHMENTS_COPY_STATUS)null);
+
+        // Replace private readonly field _afrDataAccess using reflection
+        var field = typeof(AttachmentsRequestHandler)
+            .GetField("_afrDataAccess", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(field); // to surface mismatch early
+        field.SetValue(handler, mockDataAccess.Object);
+
+        return handler;
+    }
+
+    private CreateAttachmentRequest BuildAddRequest(string chunkDir)
+    {
+        var attachmentDto = new AttachmentDto
+        {
+            AttachmentId = Guid.NewGuid().ToString(),
+            RequestType = AttachmentActions.AddAttachment,
+            Recnum = null,
+            FilePath = chunkDir,
+            ContentSize = 0,
+            FormType = "REPORT",
+            FormRecnum = "123",
+            CreatedBy = "user1"
+        };
+
+        return new CreateAttachmentRequest { Attachment = attachmentDto };
+    }
+
+    [Fact(DisplayName = "AddAttachment - happy path creates attachment and copies file")]
+    public void AddAttachment_HappyPath_CreatesAndCopiesFile()
+    {
+        // Arrange - prepare chunk directory with a single chunk file
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir);
+        string chunkFile = Path.Combine(chunkDir, "1");
+        File.WriteAllBytes(chunkFile, new byte[] { 1, 2, 3 });
+
+        // repository destination path where MoveFileToOCRSharedPath will place final file
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        // parameter access returns values used by FileCheck.GetFilePathWithGuid and GetFullPathName
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        // Setup data access to return a simple ATTACHMENT record when CreateNewAttachment called
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var fakeAttachmentRecord = new ATTACHMENT { CUSTOM_DATA = "orig" };
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(fakeAttachmentRecord);
+
+        // Build request
+        var req = BuildAddRequest(chunkDir);
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "session1" }, req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.NotNull(createResp);
+        Assert.True(createResp.IsSuccess);
+        // attachment record should be added to CustomData dictionary inside response (handler puts it in CustomData)
+        Assert.True(createResp.CustomData != null);
+        // The handler should have attempted to create the file in the repo path
+        // The repository target file path is derived from FileCheck.GetFullPathName; we assert repo dir exists and contains a file
+        Assert.True(Directory.Exists(repoDir));
+        var filesInRepo = Directory.GetFiles(repoDir);
+        Assert.True(filesInRepo.Length >= 1);
+
+        // cleanup
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "AddAttachment - chunk directory empty still returns success")]
+    public void AddAttachment_EmptyChunksDirectory_Succeeds()
+    {
+        // Arrange
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir); // no files inside
+
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(new ATTACHMENT());
+
+        var req = BuildAddRequest(chunkDir);
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "s2" }, req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+
+        // cleanup
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "MoveFileToOCRSharedPath - copies file when destination missing")]
+    public void MoveFileToOCRSharedPath_CopiesFile()
+    {
+        // This test goes through AddAttachment which calls MoveFileToOCRSharedPath internally.
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir);
+        File.WriteAllBytes(Path.Combine(chunkDir, "1"), new byte[] { 9, 9 });
+
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(new ATTACHMENT());
+
+        var req = BuildAddRequest(chunkDir);
+
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "s3" }, req);
+
+        Assert.True(resp.Response.Success);
+        Assert.True(resp.Result is CreateAttachmentResponse r && r.IsSuccess);
+        var destFiles = Directory.GetFiles(repoDir);
+        Assert.True(destFiles.Length > 0);
+
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "UpdateAttachmentDeleteStatus - attachment exists and is deleted (ACK true)")]
+    public void UpdateAttachmentDeleteStatus_AttachmentExists_IsDeleted()
+    {
+        // Arrange
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "ref-1",
+            RequestType = AttachmentActions.AttachmentDeleteStatus
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        // Data access returns an attachment that is marked deleted
+        var attachmentRecord = new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "ACK_OK" };
+        mockDataAccess.Setup(m => m.GetAttachmentByRef("ref-1")).Returns(attachmentRecord);
+
+        // Act: call HandleMessage which will call UpdateAttachmentDeleteStatus branch
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+        Assert.Equal("ACK_OK", createResp.Message);
+    }
+
+    [Fact(DisplayName = "UpdateAttachmentDeleteStatus - attachment exists and is not deleted (ACK false)")]
+    public void UpdateAttachmentDeleteStatus_AttachmentExists_NotDeleted()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "ref-2",
+            RequestType = AttachmentActions.AttachmentDeleteStatus
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        // Data access returns an attachment that is NOT deleted
+        var attachmentRecord = new ATTACHMENT { IS_DELETED = false, ACK_MESSAGE = "PENDING_ACK" };
+        mockDataAccess.Setup(m => m.GetAttachmentByRef("ref-2")).Returns(attachmentRecord);
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.False(createResp.IsSuccess);
+        Assert.Equal("PENDING_ACK", createResp.Message);
+    }
+
+    [Fact(DisplayName = "DeleteAttachmentFromOCR - linked recnum not provided => short-circuit")]
+    public void DeleteAttachmentFromOCR_LinkedRecnumMissing_ShortCircuits()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        // Build delete request with LinkedAttachmentRecnum empty or non-numeric
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "some-ref",
+            RequestType = AttachmentActions.DeleteAttachment,
+            LinkedAttachmentRecnum = "0", // will parse to 0 => short-circuit
+            CreatedBy = "userX"
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Expect success (handler sets response.Success = true) and no exception
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+    }
+
+    [Fact(DisplayName = "InsertAttachmentCopyStatus - handles Add/Update flow")]
+    public void InsertAttachmentCopyStatus_AddsOrUpdatesStatus()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        // Ensure parameter access returns a repo path used by FileCheck
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var req = BuildAddRequest(repoDir);
+
+        // The local method InsertAttachmentCopyStatus inside handler creates a NEW MFRDataAccess locally.
+        // To detect this call we cannot replace that local instance easily. Instead we assert no exception and that the handler completes.
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "HandleMessage - if parameterAccess throws -> response failure and logger.Critical called")]
+    public void HandleMessage_ParameterAccessThrows_GracefulFailure()
+    {
+        // Arrange: make parameter access throw
+        _mockParameterAccess.Setup(p => p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+                            .Throws(new Exception("param-fail"));
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var req = BuildAddRequest(Path.Combine(Path.GetTempPath(), "doesnt-matter"));
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Assert
+        Assert.False(resp.Response.Success);
+        _mockLogger.Verify(l => l.Critical(It.IsAny<string>(), It.IsAny<Exception>()), Times.AtLeastOnce);
+    }
+}
+--------
+using Intergraph.MFR.ApprovalsModule;
+using Microsoft.Extensions.Logging;
+using Moq;
+using System;
+using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using Xunit;
+
+public class FileCheckTests
+{
+    private readonly Mock<ILogger> _loggerMock;
+    private readonly FileCheck _fileCheck;
+
+    public FileCheckTests()
+    {
+        _loggerMock = new Mock<ILogger>();
+        _fileCheck = new FileCheck(_loggerMock.Object);
+    }
+
+    [Fact]
+    public void GetFilePathWithGuid_ReturnsCorrectPath()
+    {
+        string repo = "/root/{0}";
+        string guid = "123";
+
+        var result = _fileCheck.GetFilePathWithGuid(repo, guid);
+
+        Assert.Equal(Path.Combine("/root/123"), result);
+    }
+
+    [Fact]
+    public void CreateUploadDirectoryIfNotExist_ThrowsForNull()
+    {
+        Assert.Throws<ArgumentNullException>(() => _fileCheck.CreateUploadDirectoryIfNotExist(null));
+    }
+
+    [Fact]
+    public void CreateUploadDirectoryIfNotExist_CreatesDirectory()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+
+        var result = _fileCheck.CreateUploadDirectoryIfNotExist(dir);
+
+        Assert.True(Directory.Exists(dir));
+        Assert.Equal(dir, result);
+    }
+
+    [Fact]
+    public void GetFullPathName_ReturnsCombinedPath()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        string file = "file.txt";
+
+        var full = _fileCheck.GetFullPathName(dir, file);
+
+        Assert.Equal(Path.Combine(dir, file), full);
+    }
+
+    [Fact]
+    public void CheckDirectoryAccess_ThrowsWhenNoWritePermission()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(dir);
+
+        DirectorySecurity security = Directory.GetAccessControl(dir);
+        SecurityIdentifier everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(everyone, FileSystemRights.Write, AccessControlType.Deny));
+        Directory.SetAccessControl(dir, security);
+
+        Assert.Throws<InvalidOperationException>(() => _fileCheck.CheckDirecotoryAccess(dir));
+    }
+
+    [Fact]
+    public void CheckDirectoryAccess_AllowsWhenNoDenyRule()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(dir);
+
+        _fileCheck.CheckDirecotoryAccess(dir);
+    }
+}
+----------
+using Xunit;
+using Moq;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
+
+public class SecuredRecordGroupsRequestHandlerTests
+{
+    [Fact]
+    public void HandleMessage_ShouldReturnGroups_WhenGetRequestSucceeds()
+    {
+        // Arrange
+        var logger = new Mock<ILogger>();
+        var localStrings = new Mock<ILocalizedStrings>();
+        var paramAccess = new Mock<IParameterAccess>();
+        var header = new Mock<IMessageHeader>();
+        header.Setup(h => h.Format).Returns("TestHeader");
+
+        string apiResponseJson = @"{
+            ""recordSecurityGroups"": [
+                { ""GroupId"": 1, ""GroupName"": ""Admins"" },
+                { ""GroupId"": 2, ""GroupName"": ""Editors"" }
+            ]
+        }";
+
+        var mockRestService = new Mock<IWebRMSRestServiceManager>();
+        mockRestService.Setup(s => s.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+                       .Returns(apiResponseJson);
+
+        // ✅ substitute WebRMSRestServiceManager via factory
+        Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = 
+            (uid, access) => mockRestService.Object;
+
+        var handler = new SecuredRecordGroupsRequestHandler(logger.Object, localStrings.Object, paramAccess.Object, factory);
+
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            UserId = "User1",
+            Recnums = "100",
+            TableName = "SecTable",
+            RequestType = "fetch"
+        };
+
+        // Act
+        var result = handler.HandleMessage(header.Object, request);
+
+        // Assert
+        var responseObj = result.Message as MFRSecuredRecordGroupsResponse;
+
+        Assert.NotNull(responseObj);
+        Assert.True(responseObj.IsSuccess);
+        Assert.Equal(2, responseObj.RecordSecurityGroups.Count);
+        Assert.Equal("Admins", responseObj.RecordSecurityGroups[0].GroupName);
+        Assert.True(result.Response.Success);
+    }
+}
+
+
+public Func<string, IParameterAccess, IWebRMSRestServiceManager> RestServiceFactory;
+
+public SecuredRecordGroupsRequestHandler(
+    ILogger logger,
+    ILocalizedStrings localizedStrings,
+    IParameterAccess parameterAccess,
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> restFactory
+) : base(logger, localizedStrings, null, "MFR SECURED RECORD_GROUPS_REQ")
+{
+    this.logger = logger;
+    this.localizedStrings = localizedStrings;
+    _parameterAccess = parameterAccess;
+    RestServiceFactory = restFactory;
+}
+
+[Fact]
+public void HandleMessage_ShouldAddGroups_WhenRequestTypeIsAdd()
+{
+    var logger = new Mock<ILogger>();
+    var localStrings = new Mock<ILocalizedStrings>();
+    var paramAccess = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    string apiResp = "{ \"recordSecurityGroups\": [] }";
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(s => s.AddRemoveGroupsToSecuredRecord("10", "TBL", "5,6", "add"))
+        .Returns("OK");
+    rest.Setup(s => s.GetSecuredRecordGroups("10", "TBL"))
+        .Returns(apiResp);
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, localStrings.Object, paramAccess.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u1", Recnums="10", TableName="TBL", GroupsRecnums="5,6", RequestType="add" };
+
+    var result = handler.HandleMessage(header.Object, req);
+
+    var response = (MFRSecuredRecordGroupsResponse)result.Message!;
+    Assert.True(result.Response.Success);
+    Assert.True(response.IsSuccess);
+}
+[Fact]
+public void HandleMessage_ShouldRemoveGroups_WhenRequestTypeIsRemove()
+{
+    var logger = new Mock<ILogger>();
+    var localStrings = new Mock<ILocalizedStrings>();
+    var paramAccess = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(x => x.AddRemoveGroupsToSecuredRecord("10", "TBL", "7", "remove"))
+        .Returns("OK");
+    rest.Setup(x => x.GetSecuredRecordGroups("10", "TBL"))
+        .Returns("{\"recordSecurityGroups\":[]}");
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, localStrings.Object, paramAccess.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u1", Recnums="10", TableName="TBL", GroupsRecnums="7", RequestType="remove" };
+
+    var result = handler.HandleMessage(header.Object, req);
+    var resp = (MFRSecuredRecordGroupsResponse)result.Message!;
+
+    Assert.True(result.Response.Success);
+    Assert.True(resp.IsSuccess);
+}
+[Fact]
+public void HandleMessage_ShouldFail_WhenApiReturnsNull()
+{
+    var logger = new Mock<ILogger>();
+    var strings = new Mock<ILocalizedStrings>();
+    var param = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+        .Returns(string.Empty);
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, strings.Object, param.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u", Recnums="1", TableName="T", RequestType="fetch" };
+
+    var res = handler.HandleMessage(header.Object, req);
+    Assert.False(res.Response.Success);
+}
+[Fact]
+public void HandleMessage_ShouldFail_WhenTokenMissing()
+{
+    var logger = new Mock<ILogger>();
+    var ls = new Mock<ILocalizedStrings>();
+    var pa = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(x => x.GetSecuredRecordGroups("10","TBL"))
+        .Returns("{}");
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, ls.Object, pa.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u", Recnums="10", TableName="TBL", RequestType="fetch" };
+
+    var result = handler.HandleMessage(header.Object, req);
+
+    Assert.False(result.Response.Success);
+}
+
+
+[Fact]
+public void HandleMessage_ShouldFail_OnInvalidJson()
+{
+    var logger = new Mock<ILogger>();
+    var ls = new Mock<ILocalizedStrings>();
+    var pa = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+        .Returns("INVALID_JSON");
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, ls.Object, pa.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u", Recnums="1", TableName="T", RequestType="fetch" };
+
+    var result = handler.HandleMessage(header.Object, req);
+
+    Assert.False(result.Response.Success);
+}
+[Fact]
+public void HandleMessage_ShouldCatchException()
+{
+    var logger = new Mock<ILogger>();
+    var ls = new Mock<ILocalizedStrings>();
+    var pa = new Mock<IParameterAccess>();
+    var header = new Mock<IMessageHeader>();
+
+    var rest = new Mock<IWebRMSRestServiceManager>();
+    rest.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+        .Throws(new Exception("API Failed"));
+
+    Func<string, IParameterAccess, IWebRMSRestServiceManager> factory = (_, __) => rest.Object;
+
+    var handler = new SecuredRecordGroupsRequestHandler(logger.Object, ls.Object, pa.Object, factory);
+
+    var req = new MFRSecuredRecordGroupsRequest { UserId="u", Recnums="1", TableName="T", RequestType="fetch" };
+
+    var result = handler.HandleMessage(header.Object, req);
+
+    Assert.False(result.Response.Success);
+    Assert.Contains("Failed", result.Response.Messages[0]);
+}
+-------
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using Moq;
+using Xunit;
+
+// Update these using statements to match your project's namespaces
+using Intergraph.MFR.ApprovalsCommandModule;
+
+public class AttachmentsRequestHandlerTests
+{
+    private readonly Mock<ILogger> _mockLogger = new();
+    private readonly Mock<ILocalizedStrings> _mockLocalized = new();
+    private readonly Mock<ISession> _mockSession = new();
+    private readonly Mock<IParameterAccess> _mockParameterAccess = new();
+
+    // Helper: create handler instance and inject a mocked MFRDataAccess into private field _afrDataAccess
+    private AttachmentsRequestHandler CreateHandlerAndInjectDataAccess(out Mock<MFRDataAccess> mockDataAccess)
+    {
+        var handler = new AttachmentsRequestHandler(
+            _mockLogger.Object,
+            _mockLocalized.Object,
+            _mockSession.Object,
+            _mockParameterAccess.Object);
+
+        mockDataAccess = new Mock<MFRDataAccess>(_mockParameterAccess.Object, _mockLogger.Object) { CallBase = false };
+
+        // sensible defaults to avoid nulls in tests
+        mockDataAccess.Setup(m => m.GetAttachmentCopyStatusByReferenceId(It.IsAny<string>()))
+                      .Returns((ATTACHMENTS_COPY_STATUS)null);
+
+        // Replace private readonly field _afrDataAccess using reflection
+        var field = typeof(AttachmentsRequestHandler)
+            .GetField("_afrDataAccess", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(field); // early fail if field name differs
+        field.SetValue(handler, mockDataAccess.Object);
+
+        return handler;
+    }
+
+    private CreateAttachmentRequest BuildAddRequest(string chunkDir)
+    {
+        var attachmentDto = new AttachmentDto
+        {
+            AttachmentId = Guid.NewGuid().ToString(),
+            RequestType = AttachmentActions.AddAttachment,
+            Recnum = null,
+            FilePath = chunkDir,
+            ContentSize = 0,
+            FormType = "REPORT",
+            FormRecnum = "123",
+            CreatedBy = "user1"
+        };
+
+        return new CreateAttachmentRequest { Attachment = attachmentDto };
+    }
+
+    [Fact(DisplayName = "AddAttachment - happy path creates attachment and copies file")]
+    public void AddAttachment_HappyPath_CreatesAndCopiesFile()
+    {
+        // Arrange - prepare chunk directory with a single chunk file
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir);
+        string chunkFile = Path.Combine(chunkDir, "1");
+        File.WriteAllBytes(chunkFile, new byte[] { 1, 2, 3 });
+
+        // repository destination path where MoveFileToOCRSharedPath will place final file
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        // parameterAccess returns values used by FileCheck.GetFilePathWithGuid and GetFullPathName
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        // Inject mock data access
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var fakeAttachmentRecord = new ATTACHMENT { CUSTOM_DATA = "orig" };
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(fakeAttachmentRecord);
+
+        var req = BuildAddRequest(chunkDir);
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "session1" }, req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.NotNull(createResp);
+        Assert.True(createResp.IsSuccess);
+        Assert.NotNull(createResp.CustomData);
+        // repository should contain the created file (MoveFileToOCRSharedPath writes into repo)
+        Assert.True(Directory.Exists(repoDir));
+        Assert.True(Directory.GetFiles(repoDir).Length >= 1);
+
+        // cleanup
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "AddAttachment - chunk directory empty still returns success")]
+    public void AddAttachment_EmptyChunksDirectory_Succeeds()
+    {
+        // Arrange
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir); // no files inside
+
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(new ATTACHMENT());
+
+        var req = BuildAddRequest(chunkDir);
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "s2" }, req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+
+        // cleanup
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "MoveFileToOCRSharedPath - copies file when destination missing")]
+    public void MoveFileToOCRSharedPath_CopiesFile()
+    {
+        // This test goes through AddAttachment which calls MoveFileToOCRSharedPath internally.
+        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(chunkDir);
+        File.WriteAllBytes(Path.Combine(chunkDir, "1"), new byte[] { 9, 9 });
+
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrCombinedChunksRepositoryLocation"))
+                            .Returns(chunkDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+        mockDataAccess.Setup(m => m.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+                      .Returns(new ATTACHMENT());
+
+        var req = BuildAddRequest(chunkDir);
+
+        var resp = handler.HandleMessage(new MessageHeader { SessionId = "s3" }, req);
+
+        Assert.True(resp.Response.Success);
+        Assert.True(resp.Result is CreateAttachmentResponse r && r.IsSuccess);
+        var destFiles = Directory.GetFiles(repoDir);
+        Assert.True(destFiles.Length > 0);
+
+        Directory.Delete(chunkDir, true);
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "UpdateAttachmentDeleteStatus - attachment exists and is deleted (ACK true)")]
+    public void UpdateAttachmentDeleteStatus_AttachmentExists_IsDeleted()
+    {
+        // Arrange
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "ref-1",
+            RequestType = AttachmentActions.AttachmentDeleteStatus
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        // Data access returns an attachment that is marked deleted
+        var attachmentRecord = new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "ACK_OK" };
+        mockDataAccess.Setup(m => m.GetAttachmentByRef("ref-1")).Returns(attachmentRecord);
+
+        // Act: call HandleMessage which will call UpdateAttachmentDeleteStatus branch
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Assert
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+        Assert.Equal("ACK_OK", createResp.Message);
+    }
+
+    [Fact(DisplayName = "UpdateAttachmentDeleteStatus - attachment exists and is not deleted (ACK false)")]
+    public void UpdateAttachmentDeleteStatus_AttachmentExists_NotDeleted()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "ref-2",
+            RequestType = AttachmentActions.AttachmentDeleteStatus
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        // Data access returns an attachment that is NOT deleted
+        var attachmentRecord = new ATTACHMENT { IS_DELETED = false, ACK_MESSAGE = "PENDING_ACK" };
+        mockDataAccess.Setup(m => m.GetAttachmentByRef("ref-2")).Returns(attachmentRecord);
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.False(createResp.IsSuccess);
+        Assert.Equal("PENDING_ACK", createResp.Message);
+    }
+
+    [Fact(DisplayName = "DeleteAttachmentFromOCR - linked recnum not provided => short-circuit")]
+    public void DeleteAttachmentFromOCR_LinkedRecnumMissing_ShortCircuits()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        // Build delete request with LinkedAttachmentRecnum empty or non-numeric
+        var attachDto = new AttachmentDto
+        {
+            AttachmentId = "some-ref",
+            RequestType = AttachmentActions.DeleteAttachment,
+            LinkedAttachmentRecnum = "0", // will parse to 0 => short-circuit
+            CreatedBy = "userX"
+        };
+        var req = new CreateAttachmentRequest { Attachment = attachDto };
+
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Expect success (handler sets response.Success = true) and no exception
+        Assert.True(resp.Response.Success);
+        var createResp = resp.Result as CreateAttachmentResponse;
+        Assert.True(createResp.IsSuccess);
+    }
+
+    [Fact(DisplayName = "InsertAttachmentCopyStatus - handles Add/Update flow (no exception)")]
+    public void InsertAttachmentCopyStatus_AddsOrUpdatesStatus()
+    {
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        // Ensure parameter access returns a repo path used by FileCheck
+        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(repoDir);
+        _mockParameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "AfrAttachmentRepositoryLocation"))
+                            .Returns(repoDir);
+
+        var req = BuildAddRequest(repoDir);
+
+        // The local method InsertAttachmentCopyStatus inside handler creates a NEW MFRDataAccess locally.
+        // We cannot replace that local instance easily here — the test asserts there is no exception and handler completes successfully.
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        Assert.True(resp.Response.Success);
+
+        Directory.Delete(repoDir, true);
+    }
+
+    [Fact(DisplayName = "HandleMessage - if parameterAccess throws -> response failure and logger.Critical called")]
+    public void HandleMessage_ParameterAccessThrows_GracefulFailure()
+    {
+        // Arrange: make parameter access throw
+        _mockParameterAccess.Setup(p => p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+                            .Throws(new Exception("param-fail"));
+
+        var handler = CreateHandlerAndInjectDataAccess(out var mockDataAccess);
+
+        var req = BuildAddRequest(Path.Combine(Path.GetTempPath(), "doesnt-matter"));
+
+        // Act
+        var resp = handler.HandleMessage(new MessageHeader(), req);
+
+        // Assert
+        Assert.False(resp.Response.Success);
+        _mockLogger.Verify(l => l.Critical(It.IsAny<string>(), It.IsAny<Exception>()), Times.AtLeastOnce);
+    }
+}
+----------
+using Xunit;
+using Moq;
+using System;
+using Intergraph.MFR.ApprovalsModule;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+using Intergraph.MFR.DataAccess;
+using Intergraph.MFR.DataAccess.Entities;
+
+public class GetAttachmentsCopyStatusRequestHandlerTests
+{
+    private readonly Mock<ILogger> _loggerMock = new();
+    private readonly Mock<ILocalizedStrings> _localStringsMock = new();
+    private readonly Mock<IParameterAccess> _parameterAccessMock = new();
+    private readonly Mock<IMFRDataAccess> _mfrDataAccessMock = new();
+
+    private GetAttachmentsCopyStatusRequestHandler CreateHandler()
+    {
+        return new GetAttachmentsCopyStatusRequestHandler(
+            _loggerMock.Object,
+            _localStringsMock.Object,
+            _parameterAccessMock.Object
+        );
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnSuccess_WhenStatusFetched()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
+        var header = new MessageHeader();
+
+        var expectedStatus = new ATTACHMENTS_COPY_STATUS { COPY_STATUS = "Completed" };
+
+        var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
+        dataAccessMock.Setup(x => x.GetAttachmentCopyStatusByReferenceId("123"))
+                      .Returns(expectedStatus);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        var response = (MFRGetAttachmentCopyStatusResponse)result.Message;
+        Assert.True(result.Response.Success);
+        Assert.Equal("Completed", response.attachmentCopyStatus);
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnFailure_WhenExceptionThrown()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
+        var header = new MessageHeader();
+
+        var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
+        dataAccessMock.Setup(x => x.GetAttachmentCopyStatusByReferenceId("123"))
+                      .Throws(new Exception("DB Error"));
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.False(result.Response.Success);
+        Assert.Contains("DB Error", result.Response.Messages[0]);
+    }
+}
+---------
+using Xunit;
+using Moq;
+using System;
+using System.Collections.Generic;
+using Intergraph.MFR.ApprovalsModule;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+using Newtonsoft.Json.Linq;
+
+public class InternalMessagesRequestHandlerTests
+{
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _local = new();
+    private readonly Mock<IParameterAccess> _param = new();
+    private readonly Mock<IWebRestServiceManager> _webService = new();
+
+    private InternalMessagesRequestHandler CreateHandler()
+    {
+        return new InternalMessagesRequestHandler(
+            _logger.Object,
+            _local.Object,
+            _param.Object
+        );
+    }
+
+    // Helper for injecting mocked service
+    private void SetupService(string result)
+    {
+        _webService.Setup(s => s.GetInternalMessages("Inbox", 1, "date", "asc", true, null))
+                   .Returns(result);
+
+        _webService.Setup(s => s.GetInternalMessages(null, null, null, null, null, "10"))
+                   .Returns(result);
+
+        _webService.Setup(s => s.AddInternalMessage("user@test.com", "Subject", "Body"))
+                   .Returns(result);
+
+        _webService.Setup(s => s.UpdateMessageAsRead("10"))
+                   .Returns(result);
+    }
+
+    [Fact]
+    public void HandleMessage_GetMessages_Success()
+    {
+        // Arrange
+        string json = @"{
+            'list':[{'Body':'Hi'}],
+            'pageNumber':'1','totalCount':'10','pageSize':'10','maxPage':'1'
+        }";
+
+        SetupService(json);
+
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "GetMessages",
+            Folder = "Inbox",
+            PageNumber = 1,
+            SortField = "date",
+            SortDir = "asc",
+            Unread = true,
+            UserId = "U1"
+        };
+
+        var header = new MessageHeader();
+
+        // Act
+        var response = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.True(response.Response.Success);
+        var msg = (MFRInternalMessagesResponse)response.Message;
+        Assert.Single(msg.InternalMessages);
+        Assert.Equal("1", msg.PageNumber);
+    }
+
+    [Fact]
+    public void HandleMessage_GetMessage_Success()
+    {
+        // Arrange
+        string json = @"{ 'Body':'Hello', 'From':'system@test.com' }";
+
+        SetupService(json);
+
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "GetMessage",
+            Recnum = "10",
+            UserId = "U1"
+        };
+
+        // Act
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        Assert.True(result.Response.Success);
+        var obj = (MFRInternalMessagesResponse)result.Message;
+        Assert.NotNull(obj.MessageDetails);
+        Assert.Equal("Hello", obj.MessageDetails.Body);
+    }
+
+    [Fact]
+    public void HandleMessage_AddMessage_Success()
+    {
+        SetupService("{ 'result' : 'OK' }");
+
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "AddMessage",
+            MessageDetails = new MessageDetails
+            {
+                To = "user@test.com",
+                Subject = "Subject",
+                Body = "Body"
+            },
+            UserId = "U1"
+        };
+
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        Assert.True(result.Response.Success);
+    }
+
+    [Fact]
+    public void HandleMessage_UpdateMessageAsRead_Success()
+    {
+        SetupService("{ 'result' : 'OK' }");
+
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "UpdateMessageAsRead",
+            Recnum = "10",
+            UserId = "U1"
+        };
+
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        Assert.True(result.Response.Success);
+    }
+
+    [Fact]
+    public void HandleMessage_InvalidAction_Throws()
+    {
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "Invalid",
+            UserId = "U1"
+        };
+
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        Assert.False(result.Response.Success);
+        Assert.Contains("Invalid action", result.Response.Messages[0]);
+    }
+
+    [Fact]
+    public void HandleMessage_Exception_ReturnsFailure()
+    {
+        // Arrange
+        _webService.Setup(s => s.GetInternalMessages(It.IsAny<string>(), 1, It.IsAny<string>(), It.IsAny<string>(), true, null))
+                   .Throws(new Exception("Crash"));
+
+        var handler = CreateHandler();
+
+        var request = new MFRInternalMessagesRequest
+        {
+            ActionType = "GetMessages",
+            Folder = "Inbox",
+            PageNumber = 1,
+            SortField = "date",
+            SortDir = "asc",
+            Unread = true,
+            UserId = "U1"
+        };
+
+        // Act
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        Assert.False(result.Response.Success);
+        Assert.Contains("Crash", result.Response.Messages[0]);
+    }
+}
+-----------
+using Xunit;
+using Moq;
+using System;
+using Intergraph.MFR.ApprovalsModule;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+
+public class MergeChunksStatusRequestHandlerTests
+{
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _localized = new();
+    private readonly Mock<IParameterAccess> _parameterAccess = new();
+    private readonly Mock<IMFRDataAccess> _mfrDataAccess = new(); // assuming wrapper interface
+
+    private MergeChunksStatusRequestHanlder CreateHandler()
+    {
+        return new MergeChunksStatusRequestHanlder(
+            _logger.Object, _localized.Object, _parameterAccess.Object
+        );
+    }
+
+    [Fact]
+    public void HandleMessage_Success_ReturnsMergeStatus()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var request = new MFRGetMergeChunkStatusRequest { AttachmentId = "123" };
+
+        var dbResult = new MERGE_CHUNKS_PROGRESS
+        {
+            MERGE_STATUS = "Completed"
+        };
+
+        Mock<MFRDataAccessFactory>.Instance
+            .Setup(f => f.Create(_parameterAccess.Object, _logger.Object))
+            .Returns(_mfrDataAccess.Object);
+
+        _mfrDataAccess.Setup(d => d.GetAttachmentProgressByReferenceId("123"))
+                      .Returns(dbResult);
+
+        // Act
+        var response = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        Assert.True(response.Response.Success);
+        var msg = (MFRGetMergeChunkStatusResponse)response.Message;
+        Assert.Equal("Completed", msg.MergeStatus);
+    }
+
+    [Fact]
+    public void HandleMessage_Exception_ReturnsErrorResponse()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var request = new MFRGetMergeChunkStatusRequest { AttachmentId = "ABC" };
+
+        Mock<MFRDataAccessFactory>.Instance
+            .Setup(f => f.Create(_parameterAccess.Object, _logger.Object))
+            .Returns(_mfrDataAccess.Object);
+
+        _mfrDataAccess.Setup(d => d.GetAttachmentProgressByReferenceId("ABC"))
+                      .Throws(new Exception("DB Fail"));
+
+        // Act
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        Assert.True(result.Response.Success); // code sets success even in catch
+        Assert.Contains("DB Fail", result.Response.Messages[0]);
+
+        _logger.Verify(l => l.Critical(
+            It.Is<string>(msg => msg.Contains("Error while merging chunks")),
+            It.IsAny<Exception>()
+        ), Times.Once);
+    }
+}
+-------
+public interface IMFRDataAccess
+{
+    MERGE_CHUNKS_PROGRESS GetAttachmentProgressByReferenceId(string refId);
+}
+
+public static class MFRDataAccessFactory
+{
+    public static Func<IParameterAccess, ILogger, IMFRDataAccess> Instance =
+        (param, log) => new MFRDataAccess(param, log);
+}
+var frDataAccess = MFRDataAccessFactory.Instance(_parameterAccess, _logger);
+
+
+using Xunit;
+using Moq;
+using System;
+using HFR.ApprovalsModule;
+using Microsoft.Extensions.Logging;
+
+public class NcicConfigRequestHandlerTests
+{
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _localizedStrings = new();
+    private readonly Mock<IParameterAccess> _parameterAccess = new();
+    private readonly NcicConfigRequestHandler _handler;
+
+    public NcicConfigRequestHandlerTests()
+    {
+        _handler = new NcicConfigRequestHandler(
+            _logger.Object,
+            _localizedStrings.Object,
+            _parameterAccess.Object
+        );
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnSuccess_WhenProcessSucceeds()
+    {
+        // Arrange
+        var header = new MessageHeader(); 
+        var request = new MFRNcicQueryConfigRequest
+        {
+            ActionType = "getNCICFileTypes",
+            UserId = "test-user"
+        };
+
+        var expectedResponse = "SUCCESS";
+        var handlerMock = new Mock<NcicConfigRequestHandler>(
+            _logger.Object, 
+            _localizedStrings.Object,
+            _parameterAccess.Object
+        );
+
+        handlerMock
+            .Setup(x => x.ProcessNcicQueryRequest(request, null, null, null))
+            .Returns(expectedResponse);
+
+        // Act
+        var result = handlerMock.Object.HandleMessage(header, request);
+
+        // Assert
+        Assert.True(result.Response.Success);
+        Assert.NotNull(result);
+        handlerMock.Verify(x => x.ProcessNcicQueryRequest(request, null, null, null), Times.Once);
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnFailure_WhenExceptionThrown()
+    {
+        // Arrange
+        var header = new MessageHeader();
+        var request = new MFRNcicQueryConfigRequest { ActionType = "getNCICFileTypes" };
+
+        var handlerMock = new Mock<NcicConfigRequestHandler>(
+            _logger.Object, 
+            _localizedStrings.Object,
+            _parameterAccess.Object
+        );
+
+        handlerMock
+            .Setup(x => x.ProcessNcicQueryRequest(It.IsAny<MFRNcicQueryConfigRequest>(), null, null, null))
+            .Throws(new Exception("Test exception"));
+
+        // Act
+        var result = handlerMock.Object.HandleMessage(header, request);
+
+        // Assert
+        Assert.False(result.Response.Success);
+        Assert.Contains("Failed to perform", result.Response.Messages[0]);
+    }
+}
