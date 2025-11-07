@@ -1,6 +1,7 @@
 using Xunit;
 using Moq;
 using System;
+using System.Reflection;
 using Intergraph.MFR.ApprovalsModule;
 using Intergraph.Framework.Contracts;
 using Intergraph.Framework.Logging;
@@ -20,28 +21,31 @@ public class GetAttachmentsCopyStatusRequestHandlerTests
         _mfrDataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
     }
 
-    private class TestableHandler : GetAttachmentsCopyStatusRequestHandler
+    private GetAttachmentsCopyStatusRequestHandler CreateHandlerWithMockedDataAccess()
     {
-        private readonly MFRDataAccess _dataAccess;
+        var handler = new GetAttachmentsCopyStatusRequestHandler(
+            _loggerMock.Object,
+            _localStringsMock.Object,
+            _parameterAccessMock.Object
+        );
 
-        public TestableHandler(ILogger logger, ILocalizedStrings localizedStrings, IParameterAccess parameterAccess, MFRDataAccess dataAccess)
-            : base(logger, localizedStrings, parameterAccess)
+        // Use reflection to inject our mock MFRDataAccess instance
+        var field = typeof(GetAttachmentsCopyStatusRequestHandler)
+            .GetField("_mfrDataAccess", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        if (field != null)
         {
-            _dataAccess = dataAccess;
+            field.SetValue(handler, _mfrDataAccessMock.Object);
         }
 
-        // override to return mock instance
-        protected override MFRDataAccess CreateDataAccess() => _dataAccess;
+        return handler;
     }
-
-    private GetAttachmentsCopyStatusRequestHandler CreateHandler() =>
-        new TestableHandler(_loggerMock.Object, _localStringsMock.Object, _parameterAccessMock.Object, _mfrDataAccessMock.Object);
 
     [Fact]
     public void HandleMessage_ShouldReturnSuccess_WhenStatusFetched()
     {
         // Arrange
-        var handler = CreateHandler();
+        var handler = CreateHandlerWithMockedDataAccess();
         var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
         var header = new MessageHeader();
 
@@ -62,7 +66,7 @@ public class GetAttachmentsCopyStatusRequestHandlerTests
     public void HandleMessage_ShouldReturnFailure_WhenExceptionThrown()
     {
         // Arrange
-        var handler = CreateHandler();
+        var handler = CreateHandlerWithMockedDataAccess();
         var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
         var header = new MessageHeader();
 
@@ -75,7 +79,7 @@ public class GetAttachmentsCopyStatusRequestHandlerTests
         // Assert
         Assert.False(result.Response.Success);
 
-        // safer check
+        // Handle null-safe comparison
         Assert.Contains(result.Response.Messages, msg => msg.Contains("DB Error", StringComparison.OrdinalIgnoreCase));
     }
 }
