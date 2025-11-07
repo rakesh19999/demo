@@ -1,0 +1,98 @@
+using Xunit;
+using Moq;
+using System;
+using Intergraph.MFR.ApprovalsModule;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+using Intergraph.MFR.DataAccess;
+using Intergraph.MFR.DataAccess.Entities;
+
+public class GetAttachmentsCopyStatusRequestHandlerTests
+{
+    private readonly Mock<ILogger> _loggerMock = new();
+    private readonly Mock<ILocalizedStrings> _localStringsMock = new();
+    private readonly Mock<IParameterAccess> _parameterAccessMock = new();
+
+    // 👇 Subclass that hides the real DB call
+    private class TestableMFRDataAccess : MFRDataAccess
+    {
+        private readonly ATTACHMENTS_COPY_STATUS _result;
+        private readonly bool _throw;
+
+        public TestableMFRDataAccess(
+            IParameterAccess parameterAccess,
+            ILogger logger,
+            ATTACHMENTS_COPY_STATUS result = null,
+            bool throwException = false)
+            : base(parameterAccess, logger)
+        {
+            _result = result;
+            _throw = throwException;
+        }
+
+        // 👇 Hide the real method (not override — just hide)
+        public new ATTACHMENTS_COPY_STATUS GetAttachmentCopyStatusByReferenceId(string id)
+        {
+            if (_throw)
+                throw new Exception("DB Error");
+            return _result ?? new ATTACHMENTS_COPY_STATUS { COPY_STATUS = "Completed" };
+        }
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnSuccess_WhenStatusFetched()
+    {
+        // Arrange
+        var expected = new ATTACHMENTS_COPY_STATUS { COPY_STATUS = "Completed" };
+        var fakeDataAccess = new TestableMFRDataAccess(_parameterAccessMock.Object, _loggerMock.Object, expected);
+
+        var handler = new GetAttachmentsCopyStatusRequestHandler(
+            _loggerMock.Object,
+            _localStringsMock.Object,
+            _parameterAccessMock.Object
+        );
+
+        // 👇 Use reflection to inject fakeDataAccess
+        typeof(GetAttachmentsCopyStatusRequestHandler)
+            .GetField("_mfrDataAccess", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?
+            .SetValue(handler, fakeDataAccess);
+
+        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
+
+        // Act
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        var response = (MFRGetAttachmentCopyStatusResponse)result.Message;
+        Assert.True(result.Response.Success);
+        Assert.Equal("Completed", response.attachmentCopyStatus);
+    }
+
+    [Fact]
+    public void HandleMessage_ShouldReturnFailure_WhenExceptionThrown()
+    {
+        // Arrange
+        var fakeDataAccess = new TestableMFRDataAccess(_parameterAccessMock.Object, _loggerMock.Object, throwException: true);
+
+        var handler = new GetAttachmentsCopyStatusRequestHandler(
+            _loggerMock.Object,
+            _localStringsMock.Object,
+            _parameterAccessMock.Object
+        );
+
+        // 👇 Inject test double
+        typeof(GetAttachmentsCopyStatusRequestHandler)
+            .GetField("_mfrDataAccess", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?
+            .SetValue(handler, fakeDataAccess);
+
+        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
+
+        // Act
+        var result = handler.HandleMessage(new MessageHeader(), request);
+
+        // Assert
+        Assert.False(result.Response.Success);
+        Assert.Contains("DB Error", result.Response.Messages[0]);
+    }
+}
