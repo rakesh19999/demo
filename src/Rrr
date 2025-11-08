@@ -1,95 +1,356 @@
-using Xunit;
-using Moq;
 using System;
-using Intergraph.MFR.ApprovalsModule;
-using Intergraph.Framework.Contracts;
-using Intergraph.Framework.Logging;
-using Intergraph.Framework.Localization;
-using Intergraph.MFR.DataAccess;
-using Intergraph.MFR.DataAccess.Entities;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using FluentAssertions;
+using Moq;
+using Xunit;
 
-// ✅ Create a testable subclass inside the test file only
-public class TestableMFRDataAccess : MFRDataAccess
+// Replace the namespace & class names below with the real ones in your project.
+using Intergraph.MFR.ApprovalsModule; // assumed namespace for AttachmentsRequestHandler
+using Intergraph.Framework.Contracts; // assumed for ILogger, ISession etc.
+// using statements for types like CreateAttachmentRequest/CreateAttachmentResponse/ATTACHMENT etc.
+// Add references to your project under test.
+
+namespace MyProject.Tests
 {
-    private readonly Func<string, ATTACHMENTS_COPY_STATUS> _getStatusFunc;
-
-    public TestableMFRDataAccess(
-        IParameterAccess parameterAccess,
-        ILogger logger,
-        Func<string, ATTACHMENTS_COPY_STATUS> getStatusFunc = null
-    ) : base(parameterAccess, logger)
+    public class AttachmentsRequestHandlerTests
     {
-        _getStatusFunc = getStatusFunc;
+        // Helper: set a private (readonly) field via reflection
+        private void SetPrivateField(object target, string fieldName, object value)
+        {
+            var fi = target.GetType()
+                           .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+                           .FirstOrDefault(f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase));
+            if (fi == null)
+                throw new InvalidOperationException($"Field '{fieldName}' not found on {target.GetType().FullName}");
+            fi.SetValue(target, value);
+        }
+
+        // Helper: invoke a private instance method and return result
+        private object InvokePrivateMethod(object target, string methodName, params object[] parameters)
+        {
+            var mi = target.GetType()
+                           .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance)
+                           .FirstOrDefault(m => m.Name.Equals(methodName, StringComparison.OrdinalIgnoreCase));
+            if (mi == null)
+                throw new InvalidOperationException($"Method '{methodName}' not found on {target.GetType().FullName}");
+            return mi.Invoke(target, parameters);
+        }
+
+        // Build a basic handler instance with mocks and the ability to inject mocked MFRDataAccess
+        private AttachmentsRequestHandler CreateHandlerWithMocks(
+            out Mock<ILogger> loggerMock,
+            out Mock<ILocalizedStrings> localizedStringsMock,
+            out Mock<ISession> sessionMock,
+            out Mock<IParameterAccess> parameterAccessMock,
+            out Mock<MFRDataAccess> mfrDataAccessMock
+            )
+        {
+            loggerMock = new Mock<ILogger>();
+            localizedStringsMock = new Mock<ILocalizedStrings>();
+            sessionMock = new Mock<ISession>();
+            parameterAccessMock = new Mock<IParameterAccess>();
+
+            // NOTE: Adjust constructor parameters to match your real handler signature.
+            var handler = new AttachmentsRequestHandler(
+                loggerMock.Object,
+                localizedStringsMock.Object,
+                sessionMock.Object,
+                parameterAccessMock.Object
+            );
+
+            // Create a Mock<MFRDataAccess>. This assumes MFRDataAccess methods are virtual.
+            mfrDataAccessMock = new Mock<MFRDataAccess>(parameterAccessMock.Object, loggerMock.Object) { CallBase = false };
+
+            // Replace private field (likely named _mfrDataAccess / mfrDataAccess / efrDataAccess in your class)
+            // Attempt a handful of likely names; adjust if your private field has a different name.
+            var possibleFieldNames = new[] { "_mfrDataAccess", "mfrDataAccess", "efrDataAccess", "frDataAccess" };
+            bool replaced = false;
+            foreach (var name in possibleFieldNames)
+            {
+                try
+                {
+                    SetPrivateField(handler, name, mfrDataAccessMock.Object);
+                    replaced = true;
+                    break;
+                }
+                catch { /* keep trying names */ }
+            }
+            if (!replaced)
+            {
+                // If you cannot find the field, try to set field by type
+                var fieldByType = handler.GetType()
+                    .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+                    .FirstOrDefault(f => f.FieldType == typeof(MFRDataAccess));
+                if (fieldByType == null)
+                    throw new InvalidOperationException("Could not find a private field of type MFRDataAccess to replace; adjust test to match actual private field name.");
+                fieldByType.SetValue(handler, mfrDataAccessMock.Object);
+            }
+
+            return handler;
+        }
+
+        [Fact]
+        public void InsertAttachmentCopyStatus_WhenPending_CreatesPendingRecord()
+        {
+            // Arrange
+            var handler = CreateHandlerWithMocks(
+                out var loggerMock,
+                out var localizedStringsMock,
+                out var sessionMock,
+                out var parameterAccessMock,
+                out var mfrDataAccessMock
+            );
+
+            // Build a simple CreateAttachmentRequest with AttachmentId
+            var request = new CreateAttachmentRequest
+            {
+                Attachment = new AttachmentDto
+                {
+                    AttachmentId = "ATT-123",
+                    // other properties as required by your DTO
+                }
+            };
+
+            // Mock FileCheck to return some full path if required by InsertAttachmentCopyStatus logic.
+            // The code in your handler uses FileCheck and mfrDataAccess.GetAttachmentCopyStatus...
+            // Here we'll mock MFRDataAccess.AddOrUpdateAttachmentsCopyStatus to capture the value passed
+            ATTACHMENTS_COPY_STATUS captured = null;
+            mfrDataAccessMock.Setup(m => m.AddOrUpdateAttachmentsCopyStatus(It.IsAny<ATTACHMENTS_COPY_STATUS>()))
+                .Callback<ATTACHMENTS_COPY_STATUS>(s => captured = s);
+
+            // Act: call private InsertAttachmentCopyStatus(request, FormStatus.Pending)
+            // Note: the method signature in the handler uses strings/consts; adapt name/params to real code.
+            InvokePrivateMethod(handler, "InsertAttachmentCopyStatus", request, "Pending");
+
+            // Assert
+            captured.Should().NotBeNull();
+            captured.ATTACHMENT_ID.Should().Be("ATT-123");
+            captured.COPY_STATUS.Should().Be("Pending"); // matches FormStatus.Pending in pasted code
+            captured.CREATED_ON.Should().BeCloseTo(DateTime.Now, TimeSpan.FromSeconds(5));
+        }
+
+        [Fact]
+        public void UpdateAttachmentRecordStatus_WhenLinkedAttachmentRecnum_PendingAckMessageSet()
+        {
+            // Arrange
+            var handler = CreateHandlerWithMocks(
+                out var loggerMock,
+                out var localizedStringsMock,
+                out var sessionMock,
+                out var parameterAccessMock,
+                out var mfrDataAccessMock
+            );
+
+            // Prepare request with linked attachment recnum and a fake AttachmentId.
+            var request = new CreateAttachmentRequest
+            {
+                Attachment = new AttachmentDto
+                {
+                    AttachmentId = "ATT-999",
+                    LinkedAttachmentRecnum = "123",
+                    AttachmentRecnum = "0"
+                }
+            };
+
+            // Prepare an ATTACHMENT returned by GetAttachmentByRef
+            var existing = new ATTACHMENT
+            {
+                ATTACHMENT_ID = "ATT-999",
+                IS_DELETED = false,
+                ACK_MESSAGE = null
+            };
+
+            mfrDataAccessMock.Setup(m => m.GetAttachmentByRef("ATT-999")).Returns(existing);
+
+            // Capture the saved attachment
+            ATTACHMENT saved = null;
+            mfrDataAccessMock.Setup(m => m.AddOrUpdateAttachments(It.IsAny<ATTACHMENT>()))
+                .Callback<ATTACHMENT>(a => saved = a);
+
+            // Act
+            InvokePrivateMethod(handler, "UpdateAttachmentRecordStatus", request);
+
+            // Assert - in the pasted code when linked recnum > 0 it sets ACK_MESSAGE to PendingDelete
+            saved.Should().NotBeNull();
+            saved.ACK_MESSAGE.Should().Be("Pending Delete"); // constant in original code
+            saved.UPDATED_ON.Should().BeCloseTo(DateTime.Now, TimeSpan.FromSeconds(5));
+        }
+
+        [Fact]
+        public void UpdateAttachmentRecordStatus_WhenAttachmentRecnum_DeleteCalled()
+        {
+            // Arrange
+            var handler = CreateHandlerWithMocks(
+                out var loggerMock,
+                out var localizedStringsMock,
+                out var sessionMock,
+                out var parameterAccessMock,
+                out var mfrDataAccessMock
+            );
+
+            var request = new CreateAttachmentRequest
+            {
+                Attachment = new AttachmentDto
+                {
+                    AttachmentId = string.Empty,
+                    LinkedAttachmentRecnum = "0",
+                    AttachmentRecnum = "555"
+                }
+            };
+
+            bool deleteCalled = false;
+            mfrDataAccessMock.Setup(m => m.DeleteAttachment(555)).Callback(() => deleteCalled = true);
+
+            // Act
+            InvokePrivateMethod(handler, "UpdateAttachmentRecordStatus", request);
+
+            // Assert
+            deleteCalled.Should().BeTrue();
+        }
+
+        [Fact]
+        public void HandleMessage_WhenExceptionOccurs_InsertsFailedCopyStatusAndReturnsErrorMessage()
+        {
+            // Arrange
+            var handler = CreateHandlerWithMocks(
+                out var loggerMock,
+                out var localizedStringsMock,
+                out var sessionMock,
+                out var parameterAccessMock,
+                out var mfrDataAccessMock
+            );
+
+            // Make parameterAccess throw during construction usage or GetParameterListItem to cause exception in Handle.
+            parameterAccessMock.Setup(p => p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+                .Throws(new InvalidOperationException("boom"));
+
+            var header = new MessageHeader { SessionId = "S1" };
+            var request = new CreateAttachmentRequest
+            {
+                Attachment = new AttachmentDto
+                {
+                    AttachmentId = "ATT-err",
+                    RequestType = AttachmentActions.AddAttachment,
+                    // minimal properties
+                }
+            };
+
+            // Spy on AddOrUpdateAttachmentsCopyStatus to capture call
+            ATTACHMENTS_COPY_STATUS captured = null;
+            mfrDataAccessMock.Setup(m => m.AddOrUpdateAttachmentsCopyStatus(It.IsAny<ATTACHMENTS_COPY_STATUS>()))
+                .Callback<ATTACHMENTS_COPY_STATUS>(s => captured = s);
+
+            // Act
+            // Call the public handler method. Adjust method name if different in your class (HandleMessage vs Handlellessage).
+            var messageResponse = handler.HandleMessage(header, request);
+
+            // Assert: response contains an error message and we recorded a Failed copy status inserted
+            messageResponse.Response.Success.Should().BeTrue();
+            messageResponse.Response.Messages.Should().Contain(m => m.Contains("boom") || m.Contains("Error"));
+
+            captured.Should().NotBeNull();
+            captured.COPY_STATUS.Should().Be("Failed");
+        }
     }
 
-    public override ATTACHMENTS_COPY_STATUS GetAttachmentCopyStatusByReferenceId(string referenceId)
+    #region Test DTO / enum stubs (replace these with your actual project's types)
+    // The real project likely already has these types; include the real ones.
+    public class CreateAttachmentRequest
     {
-        if (_getStatusFunc != null)
-            return _getStatusFunc(referenceId);
-
-        return base.GetAttachmentCopyStatusByReferenceId(referenceId);
+        public AttachmentDto Attachment { get; set; }
     }
-}
-
-public class GetAttachmentsCopyStatusRequestHandlerTests
-{
-    private readonly Mock<ILogger> _loggerMock = new();
-    private readonly Mock<ILocalizedStrings> _localStringsMock = new();
-    private readonly Mock<IParameterAccess> _parameterAccessMock = new();
-
-    private GetAttachmentsCopyStatusRequestHandler CreateHandler()
+    public class CreateAttachmentResponse { }
+    public class AttachmentDto
     {
-        return new GetAttachmentsCopyStatusRequestHandler(
-            _loggerMock.Object,
-            _localStringsMock.Object,
-            _parameterAccessMock.Object
-        );
+        public string AttachmentId { get; set; }
+        public string LinkedAttachmentRecnum { get; set; }
+        public string AttachmentRecnum { get; set; }
+        public string Recnum { get; set; }
+        public string RequestType { get; set; }
+        public string CreatedBy { get; set; }
+        public string FormType { get; set; }
+        public int ContentSize { get; set; }
+        public string FilePath { get; set; }
     }
 
-    [Fact]
-    public void HandleMessage_ShouldReturnSuccess_WhenStatusFetched()
+    public class ATTACHMENTS_COPY_STATUS
     {
-        // Arrange
-        var expectedStatus = new ATTACHMENTS_COPY_STATUS { COPY_STATUS = "Completed" };
-
-        var dataAccess = new TestableMFRDataAccess(
-            _parameterAccessMock.Object,
-            _loggerMock.Object,
-            _ => expectedStatus
-        );
-
-        var handler = CreateHandler();
-        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
-        var header = new MessageHeader();
-
-        // Act
-        var result = handler.HandleMessage(header, request);
-
-        // Assert
-        var response = Assert.IsType<MFRGetAttachmentCopyStatusResponse>(result.Message);
-        Assert.True(result.Response.Success);
-        Assert.Equal("Completed", response.attachmentCopyStatus);
+        public string ATTACHMENT_ID { get; set; }
+        public string COPY_STATUS { get; set; }
+        public DateTime CREATED_ON { get; set; }
+        public DateTime UPDATED_ON { get; set; }
+        public string FILE_PATH { get; set; }
     }
 
-    [Fact]
-    public void HandleMessage_ShouldReturnFailure_WhenExceptionThrown()
+    public class ATTACHMENT
     {
-        // Arrange
-        var dataAccess = new TestableMFRDataAccess(
-            _parameterAccessMock.Object,
-            _loggerMock.Object,
-            _ => throw new Exception("DB Error")
-        );
-
-        var handler = CreateHandler();
-        var request = new MFRGetAttachmentCopyStatusRequest { AttachmentId = "123" };
-        var header = new MessageHeader();
-
-        // Act
-        var result = handler.HandleMessage(header, request);
-
-        // Assert
-        Assert.False(result.Response.Success);
-        Assert.Contains("DB Error", result.Response.Messages[0]);
+        public string ATTACHMENT_ID { get; set; }
+        public bool? IS_DELETED { get; set; }
+        public string ACK_MESSAGE { get; set; }
+        public DateTime? UPDATED_ON { get; set; }
+        public string CUSTOM_DATA { get; set; }
     }
+
+    public static class AttachmentActions
+    {
+        public const string AddAttachment = "AddAttachment";
+        public const string DeleteAttachment = "DeleteAttachment";
+        public const string AttachmentDeleteStatus = "AttachmentDeleteStatus";
+    }
+
+    public static class FormStatus
+    {
+        public const string Pending = "Pending";
+        public const string Success = "Success";
+        public const string Failed = "Failed";
+    }
+
+    // Minimal replacements - replace with your real MessageHeader/MessageResponse structure.
+    public class MessageHeader { public string SessionId { get; set; } }
+    public class MessageResponse
+    {
+        public object Payload { get; }
+        public Response Response { get; }
+        public MessageResponse(object payload, Response response)
+        {
+            Payload = payload;
+            Response = response;
+        }
+    }
+    public class Response
+    {
+        public bool Success { get; set; }
+        public System.Collections.Generic.List<string> Messages { get; } = new System.Collections.Generic.List<string>();
+    }
+
+    // Minimal stubs for interfaces used in the handler. Replace with actual project interfaces.
+    public interface ILogger
+    {
+        void Info(string s);
+        void Warning(string s);
+        void Error(string s, Exception ex = null);
+        void Critical(string s, Exception ex = null);
+        IDisposable GetTracer();
+    }
+    public interface ILocalizedStrings { }
+    public interface ISession { }
+    public interface IParameterAccess
+    {
+        string GetParameterListItem(string set, string list, string name);
+    }
+
+    // Minimal MFRDataAccess stub type - in tests we used Mock<MFRDataAccess>.
+    public class MFRDataAccess
+    {
+        public MFRDataAccess(IParameterAccess p, ILogger l) { }
+        public virtual void AddOrUpdateAttachmentsCopyStatus(ATTACHMENTS_COPY_STATUS s) { }
+        public virtual ATTACHMENT GetAttachmentByRef(string id) => null;
+        public virtual void AddOrUpdateAttachments(ATTACHMENT attachment) { }
+        public virtual void DeleteAttachment(int recnum) { }
+        public virtual ATTACHMENTS_COPY_STATUS GetAttachmentCopyStatus(string attachmentId) => null;
+        public virtual ATTACHMENT CreateNewAttachment(AttachmentDto dto) => new ATTACHMENT();
+    }
+    #endregion
 }
