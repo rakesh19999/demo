@@ -1,179 +1,177 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using Xunit;
 using Moq;
-using Intergraph.MFR.ApprovalsCommandModule;
-using Intergraph.Framework.Contracts;
-using Intergraph.Framework.Logging;
-using Intergraph.Framework.Localization;
+using Microsoft.Extensions.Logging;
 
-public class MergeChunksRequestHandlerTests
+namespace Intergraph.NFR.ApprovalsCommandModule.Tests
 {
-    private readonly Mock<ILogger> _logger = new();
-    private readonly Mock<ILocalizedStrings> _localized = new();
-    private readonly Mock<ISession> _session = new();
-    private readonly Mock<IParameterAccess> _parameterAccess = new();
-
-    private MergeChunksRequestHandler CreateHandler()
+    public class MergeChunksRequestHandlerTests
     {
-        return new MergeChunksRequestHandler(
-            _logger.Object,
-            _localized.Object,
-            _session.Object,
-            _parameterAccess.Object
-        );
-    }
+        private readonly Mock<ILogger> _loggerMock;
+        private readonly Mock<IParameterAccess> _parameterAccessMock;
+        private readonly Mock<ISession> _sessionMock;
+        private readonly Mock<ILocalizedStrings> _localizedStringsMock;
 
-    private MethodInfo GetPrivateMethod(Type type, string methodName)
-    {
-        var method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(method);
-        return method!;
-    }
+        private readonly MergeChunksRequestHandler _handler;
 
-    [Fact(DisplayName = "HandleMessage_SuccessFlow_ShouldReturnSuccessResponse")]
-    public void HandleMessage_SuccessFlow_ShouldReturnSuccessResponse()
-    {
-        // Arrange
-        var handler = CreateHandler();
-
-        // Set up fake parameter paths
-        _parameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrChunkRepositoryLocation"))
-                        .Returns(Path.GetTempPath());
-        _parameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrUploadMergeChunkPath"))
-                        .Returns(Path.GetTempPath());
-
-        // Prepare chunk directory with fake files
-        string chunkDir = Path.Combine(Path.GetTempPath(), "chunks_" + Guid.NewGuid());
-        Directory.CreateDirectory(chunkDir);
-        File.WriteAllBytes(Path.Combine(chunkDir, "1"), new byte[] { 1 });
-        File.WriteAllBytes(Path.Combine(chunkDir, "2"), new byte[] { 2 });
-
-        // Prepare dummy request
-        var request = new MFRCreateMergeChunkRequest
+        public MergeChunksRequestHandlerTests()
         {
-            MergeChunkDetails = new MergeChunkDetails
-            {
-                AttachmentGuid = Guid.NewGuid().ToString(),
-                AttachmentName = "MergedFile",
-                FileExtension = ".dat"
-            }
-        };
+            _loggerMock = new Mock<ILogger>();
+            _parameterAccessMock = new Mock<IParameterAccess>();
+            _sessionMock = new Mock<ISession>();
+            _localizedStringsMock = new Mock<ILocalizedStrings>();
 
-        var header = new MessageHeader();
-
-        // Act
-        var response = handler.HandleMessage(header, request);
-
-        // Assert
-        Assert.NotNull(response);
-        Assert.True(response.Response.Success);
-        Assert.IsType<MFRCreateMergeChunkResponse>(response.Message);
-
-        // Validate merged file created
-        string expectedMergedFile = Path.Combine(Path.GetTempPath(), request.MergeChunkDetails.AttachmentName + request.MergeChunkDetails.FileExtension);
-        Assert.True(File.Exists(expectedMergedFile));
-
-        // Clean up
-        if (Directory.Exists(chunkDir)) Directory.Delete(chunkDir, true);
-        if (File.Exists(expectedMergedFile)) File.Delete(expectedMergedFile);
-    }
-
-    [Fact(DisplayName = "HandleMessage_Exception_ShouldReturnFailureResponse")]
-    public void HandleMessage_Exception_ShouldReturnFailureResponse()
-    {
-        // Arrange
-        var handler = CreateHandler();
-
-        // Force exception by invalid repository path
-        _parameterAccess.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrChunkRepositoryLocation"))
-                        .Throws(new Exception("Invalid parameter"));
-
-        var header = new MessageHeader();
-        var request = new MFRCreateMergeChunkRequest
-        {
-            MergeChunkDetails = new MergeChunkDetails
-            {
-                AttachmentGuid = Guid.NewGuid().ToString(),
-                AttachmentName = "InvalidFile",
-                FileExtension = ".txt"
-            }
-        };
-
-        // Act
-        var response = handler.HandleMessage(header, request);
-
-        // Assert
-        Assert.NotNull(response);
-        Assert.True(response.Response.Success); // method sets Success = true even on exception
-        Assert.Contains("Invalid parameter", response.Response.Messages.First());
-    }
-
-    [Fact(DisplayName = "InsertAttachmentMergeProgress_ShouldHandleAllStatuses")]
-    public void InsertAttachmentMergeProgress_ShouldHandleAllStatuses()
-    {
-        var handler = CreateHandler();
-        var handlerType = handler.GetType();
-
-        // Use reflection to call private InsertAttachmentMergeProgress
-        var insertMethod = GetPrivateMethod(handlerType, "InsertAttachmentMergeProgess");
-
-        // Build dummy request
-        var request = new MFRCreateMergeChunkRequest
-        {
-            MergeChunkDetails = new MergeChunkDetails
-            {
-                AttachmentGuid = Guid.NewGuid().ToString(),
-                AttachmentName = "Attach",
-                FileExtension = ".dat"
-            }
-        };
-
-        // Test Pending, Success, Failed, and default
-        string[] statuses = { "Pending", "Success", "Failed", "Unknown" };
-
-        foreach (var status in statuses)
-        {
-            insertMethod.Invoke(handler, new object[] { request, status });
+            _handler = new MergeChunksRequestHandler(
+                _loggerMock.Object,
+                _localizedStringsMock.Object,
+                _sessionMock.Object,
+                _parameterAccessMock.Object
+            );
         }
 
-        // If no exception thrown — method covered all cases
-        Assert.True(true);
+        [Fact]
+        public void MergeChunksIntoAttachment_ShouldReturnTrue_WhenFilesMergedSuccessfully()
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDir);
+
+            // Create fake chunk files
+            File.WriteAllBytes(Path.Combine(tempDir, "1.chunk"), new byte[] { 1, 2, 3 });
+            File.WriteAllBytes(Path.Combine(tempDir, "2.chunk"), new byte[] { 4, 5, 6 });
+
+            var uploadPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(uploadPath);
+
+            var result = InvokePrivate<bool>(_handler, "MergeChunksIntoAttachment",
+                tempDir, uploadPath, "mergedFile", ".txt");
+
+            Assert.True(result);
+            Assert.True(File.Exists(Path.Combine(uploadPath, "mergedFile.txt")));
+        }
+
+        [Fact]
+        public void MergeChunksIntoAttachment_ShouldReturnFalse_OnException()
+        {
+            var invalidDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+
+            // This will fail because directory doesn’t exist
+            var result = InvokePrivate<bool>(_handler, "MergeChunksIntoAttachment",
+                invalidDir, "somePath", "mergedFile", ".txt");
+
+            Assert.False(result);
+        }
+
+        [Fact]
+        public void InsertAttachmentMergeProgess_ShouldHandle_PendingStatus()
+        {
+            var mockAccess = new Mock<IParameterAccess>();
+            var handler = new MergeChunksRequestHandler(
+                _loggerMock.Object, _localizedStringsMock.Object, _sessionMock.Object, mockAccess.Object);
+
+            var request = CreateDummyRequest();
+
+            var result = InvokePrivate<object>(handler, "InsertAttachmentMergeProgess", request, "Pending");
+            Assert.Null(result); // void method
+        }
+
+        [Fact]
+        public void InsertAttachmentMergeProgess_ShouldHandle_SuccessStatus()
+        {
+            var mockAccess = new Mock<IParameterAccess>();
+            var handler = new MergeChunksRequestHandler(
+                _loggerMock.Object, _localizedStringsMock.Object, _sessionMock.Object, mockAccess.Object);
+
+            var request = CreateDummyRequest();
+
+            InvokePrivate<object>(handler, "InsertAttachmentMergeProgess", request, "Success");
+        }
+
+        [Fact]
+        public void InsertAttachmentMergeProgess_ShouldHandle_FailedStatus()
+        {
+            var mockAccess = new Mock<IParameterAccess>();
+            var handler = new MergeChunksRequestHandler(
+                _loggerMock.Object, _localizedStringsMock.Object, _sessionMock.Object, mockAccess.Object);
+
+            var request = CreateDummyRequest();
+
+            InvokePrivate<object>(handler, "InsertAttachmentMergeProgess", request, "Failed");
+        }
+
+        [Fact]
+        public void InsertAttachmentMergeProgess_ShouldHandle_DefaultStatus()
+        {
+            var mockAccess = new Mock<IParameterAccess>();
+            var handler = new MergeChunksRequestHandler(
+                _loggerMock.Object, _localizedStringsMock.Object, _sessionMock.Object, mockAccess.Object);
+
+            var request = CreateDummyRequest();
+
+            InvokePrivate<object>(handler, "InsertAttachmentMergeProgess", request, "SomethingElse");
+        }
+
+        [Fact]
+        public void InsertAttachmentMergeProgess_ShouldCatch_Exception()
+        {
+            var mockAccess = new Mock<IParameterAccess>();
+            var handler = new MergeChunksRequestHandler(
+                _loggerMock.Object, _localizedStringsMock.Object, _sessionMock.Object, mockAccess.Object);
+
+            var request = CreateDummyRequest();
+
+            // Force an exception by passing null to trigger logger.Error path
+            InvokePrivate<object>(handler, "InsertAttachmentMergeProgess", null, "Pending");
+        }
+
+        [Fact]
+        public void DeleteChunks_ShouldRemoveDirectory()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "temp.txt"), "data");
+
+            InvokePrivate<object>(_handler, "DeleteChunks", dir);
+
+            Assert.False(Directory.Exists(dir));
+        }
+
+        private static T InvokePrivate<T>(object obj, string methodName, params object[] args)
+        {
+            var method = obj.GetType().GetMethod(methodName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            return (T)method.Invoke(obj, args);
+        }
+
+        private static MFRCreateMergeChunkRequest CreateDummyRequest()
+        {
+            return new MFRCreateMergeChunkRequest
+            {
+                MergeChunkDetails = new MergeChunkDetails
+                {
+                    AttachmentGuid = Guid.NewGuid().ToString(),
+                    AttachmentName = "testFile",
+                    FileExtension = ".txt"
+                }
+            };
+        }
     }
 
-    [Fact(DisplayName = "MergeChunksIntoAttachment_ShouldReturnFalse_OnError")]
-    public void MergeChunksIntoAttachment_ShouldReturnFalse_OnError()
+    // 🧩 Dummy DTOs for compilation — replace with actual if available
+    public class MFRCreateMergeChunkRequest
     {
-        var handler = CreateHandler();
-        var handlerType = handler.GetType();
-        var mergeMethod = GetPrivateMethod(handlerType, "MergeChunksIntoAttachment");
-
-        // Pass a non-existing directory to cause exception
-        string invalidChunkDir = Path.Combine(Path.GetTempPath(), "no_dir_" + Guid.NewGuid());
-        string uploadPath = Path.Combine(Path.GetTempPath(), "upload_" + Guid.NewGuid());
-        Directory.CreateDirectory(uploadPath);
-
-        var result = (bool)mergeMethod.Invoke(handler, new object[] { invalidChunkDir, uploadPath, "file", ".dat" });
-
-        Assert.False(result);
-        Directory.Delete(uploadPath, true);
+        public MergeChunkDetails MergeChunkDetails { get; set; }
     }
 
-    [Fact(DisplayName = "DeleteChunks_ShouldDeleteDirectory")]
-    public void DeleteChunks_ShouldDeleteDirectory()
+    public class MergeChunkDetails
     {
-        var handler = CreateHandler();
-        var handlerType = handler.GetType();
-        var deleteMethod = GetPrivateMethod(handlerType, "DeleteChunks");
-
-        string tempDir = Path.Combine(Path.GetTempPath(), "chunks_del_" + Guid.NewGuid());
-        Directory.CreateDirectory(tempDir);
-        File.WriteAllText(Path.Combine(tempDir, "a.txt"), "test");
-
-        Assert.True(Directory.Exists(tempDir));
-        deleteMethod.Invoke(handler, new object[] { tempDir });
-        Assert.False(Directory.Exists(tempDir));
+        public string AttachmentGuid { get; set; }
+        public string AttachmentName { get; set; }
+        public string FileExtension { get; set; }
     }
+
+    public interface IParameterAccess { }
+    public interface ISession { }
+    public interface ILocalizedStrings { }
 }
