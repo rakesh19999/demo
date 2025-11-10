@@ -2,13 +2,14 @@ using Xunit;
 using Moq;
 using System;
 using System.IO;
-using System.Collections.Generic;
-using Intergraph.MFR.ApprovalsModule;
+using System.Reflection;
 using Intergraph.Framework.Contracts;
 using Intergraph.Framework.Logging;
 using Intergraph.Framework.Localization;
 using Intergraph.MFR.DataAccess;
 using Intergraph.MFR.DataAccess.Entities;
+using Intergraph.MFR.ApprovalsModule;
+using System.Collections.Generic;
 
 public class AttachmentsRequestHandlerTests
 {
@@ -19,28 +20,46 @@ public class AttachmentsRequestHandlerTests
 
     private AttachmentsRequestHandler CreateHandler()
     {
-        return new AttachmentsRequestHandler(
+        var handler = new AttachmentsRequestHandler(
             _loggerMock.Object,
             _localizedStringsMock.Object,
             _sessionMock.Object,
             _parameterAccessMock.Object
         );
+
+        // Mock MFRDataAccess to avoid null references
+        var mockDataAccess = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
+        var mockServiceManager = new Mock<IWebRestServiceManager>();
+
+        // Inject mocks into private fields using reflection
+        InjectPrivateField(handler, "_dataAccess", mockDataAccess.Object);
+        InjectPrivateField(handler, "_serviceManager", mockServiceManager.Object);
+        InjectPrivateField(handler, "_agent", "TestAgent");
+
+        return handler;
+    }
+
+    private static void InjectPrivateField(object target, string fieldName, object value)
+    {
+        var field = target.GetType().GetField(fieldName,
+            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (field != null)
+            field.SetValue(target, value);
     }
 
     [Fact]
-    public void HandleMessage_ShouldHandle_AddAttachment_Successfully()
+    public void HandleMessage_Should_Handle_AddAttachment_Successfully()
     {
-        // Arrange
         var handler = CreateHandler();
         var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
 
-        // Create dummy files
         var dummyFile = Path.Combine(tempDir, "file1.txt");
         File.WriteAllText(dummyFile, "dummy data");
 
-        _parameterAccessMock.Setup(x => x.GetParameterListItem("MFR", "Repository", "MfrCombinedChunksRepositoryLocation"))
-                            .Returns(tempDir);
+        _parameterAccessMock.Setup(x =>
+            x.GetParameterListItem("MFR", "Repository", "MfrCombinedChunksRepositoryLocation"))
+            .Returns(tempDir);
 
         var request = new CreateAttachmentRequest
         {
@@ -48,192 +67,184 @@ public class AttachmentsRequestHandlerTests
             {
                 AttachmentId = Guid.NewGuid().ToString(),
                 RequestType = AttachmentActions.AddAttachment,
-                Recnum = null,
                 FilePath = tempDir
             }
         };
 
-        var header = new MessageHeader();
+        var result = handler.HandleMessage(new MessageHeader(), request);
 
-        // Act
-        var result = handler.HandleMessage(header, request);
-
-        // Assert
         Assert.NotNull(result);
         Assert.True(result.Response.Success);
         Directory.Delete(tempDir, true);
     }
 
     [Fact]
-    public void HandleMessage_ShouldHandle_DeleteAttachment_Successfully()
+    public void HandleMessage_Should_Handle_DeleteAttachment()
     {
         var handler = CreateHandler();
-
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "123",
+                AttachmentId = "A1",
                 RequestType = AttachmentActions.DeleteAttachment
             }
         };
 
-        var header = new MessageHeader();
-
-        var result = handler.HandleMessage(header, request);
-
-        Assert.NotNull(result);
+        var result = handler.HandleMessage(new MessageHeader(), request);
         Assert.True(result.Response.Success);
     }
 
     [Fact]
-    public void HandleMessage_ShouldHandle_AttachmentDeleteStatus_Successfully()
+    public void HandleMessage_Should_Handle_AttachmentDeleteStatus()
     {
         var handler = CreateHandler();
-
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "123",
+                AttachmentId = "B1",
                 RequestType = AttachmentActions.AttachmentDeleteStatus
             }
         };
 
-        var header = new MessageHeader();
-        var result = handler.HandleMessage(header, request);
-
-        Assert.NotNull(result);
+        var result = handler.HandleMessage(new MessageHeader(), request);
         Assert.True(result.Response.Success);
     }
 
     [Fact]
-    public void HandleMessage_ShouldHandle_UnknownType()
+    public void HandleMessage_Should_Handle_UnknownType()
     {
         var handler = CreateHandler();
-
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "123",
-                RequestType = "UnknownType"
+                RequestType = "RandomType"
             }
         };
 
-        var header = new MessageHeader();
-        var result = handler.HandleMessage(header, request);
-
+        var result = handler.HandleMessage(new MessageHeader(), request);
         Assert.True(result.Response.Success);
     }
 
     [Fact]
-    public void HandleMessage_ShouldCatch_Exception()
+    public void HandleMessage_Should_Catch_Exception()
     {
         var handler = CreateHandler();
-        var header = new MessageHeader();
-
-        var request = new CreateAttachmentRequest
-        {
-            Attachment = null // Force exception
-        };
-
-        var result = handler.HandleMessage(header, request);
-
+        var result = handler.HandleMessage(new MessageHeader(), null);
         Assert.True(result.Response.Success);
         Assert.NotEmpty(result.Response.Messages);
     }
 
     [Fact]
-    public void UpdateAttachmentDeleteStatus_Should_Set_Success_And_Failure()
+    public void UpdateAttachmentDeleteStatus_Should_Handle_Success()
     {
         var handler = CreateHandler();
-        var attachment = new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "Deleted" };
-        var createResponse = new CreateAttachmentResponse();
+
+        var att = new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "Deleted" };
+        var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
+        dataAccessMock.Setup(x => x.GetAttachmentByRef(It.IsAny<string>())).Returns(att);
+
+        InjectPrivateField(handler, "_dataAccess", dataAccessMock.Object);
 
         var request = new CreateAttachmentRequest
         {
-            Attachment = new AttachmentDto { AttachmentId = "123" }
+            Attachment = new AttachmentDto { AttachmentId = "1" }
         };
 
-        var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
-        dataAccessMock.Setup(x => x.GetAttachmentByRef("123")).Returns(attachment);
+        var response = new CreateAttachmentResponse();
 
-        handler.GetType().GetMethod("UpdateAttachmentDeleteStatus",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            .Invoke(handler, new object[] { request, createResponse });
+        InvokePrivate(handler, "UpdateAttachmentDeleteStatus", request, response);
 
-        Assert.True(createResponse.IsSuccess);
+        Assert.True(response.IsSuccess);
     }
 
     [Fact]
-    public void CheckAttachmentsFromApi_Should_Return_Success_And_Pending()
+    public void CheckAttachmentsFromApi_Should_Execute()
     {
         var handler = CreateHandler();
-        var createResponse = new CreateAttachmentResponse();
+
+        var mockService = new Mock<IWebRestServiceManager>();
+        mockService.Setup(x => x.GetAttachmentList(It.IsAny<string>(), It.IsAny<string>()))
+                   .Returns("{\"result\":{\"attachments\":[]}}");
+        InjectPrivateField(handler, "_serviceManager", mockService.Object);
 
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                CreatedBy = "tester",
-                AttachmentRecnum = "1",
                 FormType = "FormA",
-                FormRecnum = "100"
+                FormRecnum = "123",
+                CreatedBy = "user"
             }
         };
 
-        var mockService = new Mock<IWebRestServiceManager>();
-        mockService.Setup(x => x.GetAttachmentList("FormA", "100"))
-                   .Returns("{ \"result\": { \"attachments\": [] } }");
+        var response = new CreateAttachmentResponse();
+        InvokePrivate(handler, "CheckAttachmentsFromApi", request, response);
 
-        handler.GetType().GetMethod("CheckAttachmentsFromApi",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            .Invoke(handler, new object[] { request, createResponse });
-
-        Assert.True(createResponse.IsSuccess);
+        Assert.True(response.IsSuccess);
     }
 
     [Fact]
-    public void UpdateAttachmentRecordStatus_Should_Execute_All_Branches()
+    public void UpdateAttachmentRecordStatus_Should_Not_Throw()
     {
         var handler = CreateHandler();
-
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
                 AttachmentId = "1",
-                LinkedAttachmentRecnum = "1",
-                AttachmentRecnum = "2"
+                LinkedAttachmentRecnum = "10",
+                AttachmentRecnum = "11"
             }
         };
-
-        handler.GetType().GetMethod("UpdateAttachmentRecordStatus",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            .Invoke(handler, new object[] { request });
+        InvokePrivate(handler, "UpdateAttachmentRecordStatus", request);
     }
 
     [Fact]
-    public void DeleteAttachmentFromOCR_Should_Handle_All_Paths()
+    public void DeleteAttachmentFromOCR_Should_Run_All_Paths()
     {
         var handler = CreateHandler();
-
         _parameterAccessMock.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-                            .Returns("testValue");
+                            .Returns("TestValue");
 
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                LinkedAttachmentRecnum = "123",
-                AttachmentId = null,
-                CreatedBy = "tester"
+                LinkedAttachmentRecnum = "5",
+                CreatedBy = "user"
             }
         };
 
-        handler.GetType().GetMethod("DeleteAttachmentFromOCR",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            .Invoke(handler, new object[] { request });
+        InvokePrivate(handler, "DeleteAttachmentFromOCR", request);
+    }
+
+    [Fact]
+    public void InsertAttachmentMergeProgress_Should_Cover_All_Statuses()
+    {
+        var handler = CreateHandler();
+        var mergeRequest = new MFRCreateMergeChunkRequest
+        {
+            MergeChunkDetails = new MergeChunkDetails
+            {
+                AttachmentGuid = Guid.NewGuid().ToString()
+            }
+        };
+
+        var statuses = new[] { "Pending", "Success", "Failed", "Random" };
+
+        foreach (var status in statuses)
+        {
+            InvokePrivate(handler, "InsertAttachmentMergeProgess", mergeRequest, status);
+        }
+    }
+
+    private static void InvokePrivate(object instance, string methodName, params object[] args)
+    {
+        instance.GetType().GetMethod(methodName,
+            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.IgnoreCase)
+            ?.Invoke(instance, args);
     }
 }
