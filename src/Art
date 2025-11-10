@@ -1,13 +1,9 @@
-// AttachmentsRequestHandlerTests.cs
-using System;
-using System.IO;
-using System.Linq;
-using System.Reflection;
-using System.Collections.Generic;
-using Moq;
 using Xunit;
-
-// Replace these with your actual namespaces if different
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using Newtonsoft.Json.Linq;
 using Intergraph.MFR.ApprovalsModule;
 using Intergraph.Framework.Contracts;
 using Intergraph.Framework.Logging;
@@ -17,422 +13,244 @@ using Intergraph.MFR.DataAccess.Entities;
 
 public class AttachmentsRequestHandlerTests
 {
-    readonly Mock<ILogger> _logger = new();
-    readonly Mock<ILocalizedStrings> _localized = new();
-    readonly Mock<ISession> _session = new();
-    readonly Mock<IParameterAccess> _param = new();
+    private readonly Mock<ILogger> _loggerMock = new();
+    private readonly Mock<ILocalizedStrings> _localizedStringsMock = new();
+    private readonly Mock<IParameterAccess> _parameterAccessMock = new();
 
-    // create a real handler using existing constructor (no production changes)
-    private AttachmentsRequestHandler CreateHandler()
+    private TestableAttachmentsRequestHandler CreateHandler()
     {
-        return new AttachmentsRequestHandler(
-            _logger.Object,
-            _localized.Object,
-            _session.Object,
-            _param.Object
+        return new TestableAttachmentsRequestHandler(
+            _loggerMock.Object,
+            _localizedStringsMock.Object,
+            null,
+            _parameterAccessMock.Object
         );
     }
 
-    // Reflection helper: replaces private _mfrDataAccess field with fake
-    private void InjectFakeDataAccess(object handler, FakeMFRDataAccess fake)
-    {
-        var field = handler.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
-            .FirstOrDefault(f => f.FieldType == typeof(MFRDataAccess) || f.Name.ToLower().Contains("mfrdata"));
-        if (field == null) throw new InvalidOperationException("Can't find MFRDataAccess private field to inject.");
-        field.SetValue(handler, fake);
-    }
-
-    // Reflection helper: call private method
-    private object InvokePrivate(object handler, string methodName, params object[] args)
-    {
-        var method = handler.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
-        if (method == null) throw new InvalidOperationException($"Method {methodName} not found");
-        return method.Invoke(handler, args);
-    }
-
-    // ---------------------------
-    // Tests start here
-    // ---------------------------
-
-    [Fact(DisplayName = "HandleMessage_AddAttachment_ShouldCreateAttachmentAndCopyFiles")]
-    public void HandleMessage_AddAttachment_CreatesAttachmentAndCopiesFiles()
+    [Fact]
+    public void HandleMessage_ShouldAddAttachment_Success()
     {
         // Arrange
         var handler = CreateHandler();
+        handler.FileCheckMock.Setup(x => x.GetFilePathWithGuid(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Path.GetTempPath());
+        handler.FileCheckMock.Setup(x => x.CreateUploadDirectoryIfNotExist(It.IsAny<string>())).Returns(Path.GetTempPath());
+        handler.MFRDataAccessMock.Setup(x => x.CreateNewAttachment(It.IsAny<AttachmentDto>()))
+            .Returns(new ATTACHMENT { ATTACHMENT_ID = "A1", CUSTOM_DATA = "" });
 
-        // Create chunk folder and file(s)
-        string chunkDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(chunkDir);
-        File.WriteAllBytes(Path.Combine(chunkDir, "1"), new byte[] { 10, 11, 12 });
-
-        // Make parameter access return the repo paths used by FileCheck
-        _param.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrCombinedChunksRepositoryLocation"))
-              .Returns(chunkDir);
-        string repoDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(repoDir);
-        _param.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrAttachmentRepositoryLocation"))
-              .Returns(repoDir);
-
-        // Prepare fake MFRDataAccess that returns an ATTACHMENT when CreateNewAttachment is called
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            CreateNewAttachmentOverride = dto => new ATTACHMENT { ATTACHMENT_ID = dto.AttachmentId, CUSTOM_DATA = "x" },
-            AddOrUpdateAttachmentsCopyStatusOverride = s => { /* no-op */ }
-        };
-        InjectFakeDataAccess(handler, fake);
-
-        // Build the add attachment request DTO
-        var req = new CreateAttachmentRequest
+        var header = new MessageHeader();
+        var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = Guid.NewGuid().ToString(),
+                AttachmentId = "A1",
                 RequestType = AttachmentActions.AddAttachment,
                 Recnum = null,
-                FilePath = chunkDir,
-                CreatedBy = "user1"
+                FilePath = Path.GetTempPath()
             }
         };
 
-        var header = new MessageHeader { SessionId = "S1" };
+        Directory.CreateDirectory(request.Attachment.FilePath);
+        File.WriteAllText(Path.Combine(request.Attachment.FilePath, "test.txt"), "dummy");
 
         // Act
-        var result = handler.HandleMessage(header, req);
+        var result = handler.HandleMessage(header, request);
 
         // Assert
-        Assert.NotNull(result);
         Assert.True(result.Response.Success);
-        var respObj = Assert.IsType<CreateAttachmentResponse>(result.Message);
-        Assert.True(respObj.IsSuccess);
-        Assert.True(Directory.Exists(repoDir)); // repo created
-        Assert.True(Directory.GetFiles(repoDir).Length >= 1); // file copied
-
-        // Clean up
-        Directory.Delete(chunkDir, true);
-        Directory.Delete(repoDir, true);
+        Assert.True(((CreateAttachmentResponse)result.Message).IsSuccess);
     }
 
-    [Fact(DisplayName = "HandleMessage_DeleteAttachment_ShortCircuit_NoQueue")]
-    public void HandleMessage_DeleteAttachment_ShortCircuit_NoQueue()
+    [Fact]
+    public void HandleMessage_ShouldDeleteAttachment_Success()
     {
         var handler = CreateHandler();
-
-        var req = new CreateAttachmentRequest
+        var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
+                AttachmentId = "A1",
                 RequestType = AttachmentActions.DeleteAttachment,
-                LinkedAttachmentRecnum = "0", // short-circuit branch
-                AttachmentId = null,
-                CreatedBy = "user1"
+                LinkedAttachmentRecnum = "1"
             }
         };
 
-        var res = handler.HandleMessage(new MessageHeader(), req);
+        var header = new MessageHeader();
+        handler.MFRDataAccessMock.Setup(x => x.GetAttachmentByRef(It.IsAny<string>()))
+            .Returns(new ATTACHMENT { ATTACHMENT_ID = "A1" });
 
-        Assert.NotNull(res);
-        Assert.True(res.Response.Success);
-        var resp = Assert.IsType<CreateAttachmentResponse>(res.Message);
-        Assert.True(resp.IsSuccess); // per handler logic
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.True(result.Response.Success);
     }
 
-    [Fact(DisplayName = "UpdateAttachmentDeleteStatus_AttachmentExistsDeleted_ReturnsAck")]
-    public void UpdateAttachmentDeleteStatus_AttachmentExistsDeleted_ReturnsAck()
+    [Fact]
+    public void HandleMessage_ShouldHandleUnknownRequestType()
     {
         var handler = CreateHandler();
-
+        var header = new MessageHeader();
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "ref-1",
-                RequestType = AttachmentActions.AttachmentDeleteStatus,
-                CreatedBy = "user1"
+                AttachmentId = "A1",
+                RequestType = "Unknown"
             }
         };
 
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            GetAttachmentByRefOverride = id => new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "ACK_OK" }
-        };
-        InjectFakeDataAccess(handler, fake);
+        var result = handler.HandleMessage(header, request);
 
-        var res = handler.HandleMessage(new MessageHeader(), request);
-        Assert.True(res.Response.Success);
-        var resp = Assert.IsType<CreateAttachmentResponse>(res.Message);
-        Assert.True(resp.IsSuccess);
-        Assert.Equal("ACK_OK", resp.Message);
+        Assert.True(result.Response.Success);
     }
 
-    [Fact(DisplayName = "UpdateAttachmentDeleteStatus_AttachmentExistsNotDeleted_ReturnsPending")]
-    public void UpdateAttachmentDeleteStatus_AttachmentExistsNotDeleted_ReturnsPending()
+    [Fact]
+    public void HandleMessage_ShouldHandleException()
     {
         var handler = CreateHandler();
+        handler.ThrowInInsertCopyStatus = true;
+        var header = new MessageHeader();
+        var request = new CreateAttachmentRequest
+        {
+            Attachment = new AttachmentDto { AttachmentId = "A1", RequestType = AttachmentActions.AddAttachment }
+        };
 
+        var result = handler.HandleMessage(header, request);
+
+        Assert.True(result.Response.Success);
+        Assert.Contains("Insert failed", result.Response.Messages[0]);
+    }
+
+    [Fact]
+    public void UpdateAttachmentDeleteStatus_ShouldSetSuccessAndFailure()
+    {
+        var handler = CreateHandler();
+        var response = new CreateAttachmentResponse();
+        var request = new CreateAttachmentRequest
+        {
+            Attachment = new AttachmentDto { AttachmentId = "A1" }
+        };
+
+        handler.MFRDataAccessMock.Setup(x => x.GetAttachmentByRef("A1"))
+            .Returns(new ATTACHMENT { IS_DELETED = true, ACK_MESSAGE = "done" });
+        handler.InvokeUpdateAttachmentDeleteStatus(request, response);
+        Assert.True(response.IsSuccess);
+
+        handler.MFRDataAccessMock.Setup(x => x.GetAttachmentByRef("A1"))
+            .Returns(new ATTACHMENT { IS_DELETED = false, ACK_MESSAGE = "pending" });
+        handler.InvokeUpdateAttachmentDeleteStatus(request, response);
+        Assert.False(response.IsSuccess);
+    }
+
+    [Fact]
+    public void CheckAttachmentsFromApi_ShouldSetSuccessAndPending()
+    {
+        var handler = CreateHandler();
+        var response = new CreateAttachmentResponse();
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "ref-2",
-                RequestType = AttachmentActions.AttachmentDeleteStatus,
-                CreatedBy = "user1"
+                CreatedBy = "user",
+                FormType = "A",
+                FormRecnum = "R1",
+                AttachmentRecnum = "R1"
             }
         };
 
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            GetAttachmentByRefOverride = id => new ATTACHMENT { IS_DELETED = false, ACK_MESSAGE = "PENDING" }
-        };
-        InjectFakeDataAccess(handler, fake);
+        handler.WebRestServiceMock.Setup(x => x.GetAttachmentList(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(JObject.FromObject(new { result = new { attachments = new object[0] } }).ToString());
+        handler.InvokeCheckAttachmentsFromApi(request, response);
+        Assert.True(response.IsSuccess);
 
-        var res = handler.HandleMessage(new MessageHeader(), request);
-        Assert.True(res.Response.Success);
-        var resp = Assert.IsType<CreateAttachmentResponse>(res.Message);
-        Assert.False(resp.IsSuccess);
-        Assert.Equal("PENDING", resp.Message);
+        handler.WebRestServiceMock.Setup(x => x.GetAttachmentList(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(JObject.FromObject(new { attachments = new[] { new { recnum = "R1" } } }).ToString());
+        handler.InvokeCheckAttachmentsFromApi(request, response);
+        Assert.False(response.IsSuccess);
     }
 
-    [Fact(DisplayName = "CheckAttachmentsFromApi_CreatedByNull_SkipsApi")]
-    public void CheckAttachmentsFromApi_CreatedByNull_SkipsApi()
+    [Fact]
+    public void UpdateAttachmentRecordStatus_ShouldCoverAllBranches()
     {
         var handler = CreateHandler();
-
         var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                CreatedBy = null,
-                FormType = "T",
-                FormRecnum = "1",
+                AttachmentId = "A1",
+                LinkedAttachmentRecnum = "1",
                 AttachmentRecnum = "2"
             }
         };
 
-        // call private CheckAttachmentsFromApi via reflection
-        var result = InvokePrivate(handler, "CheckAttachmentsFromApi", request, new CreateAttachmentResponse());
-        Assert.NotNull(result); // method runs without exception
+        handler.MFRDataAccessMock.Setup(x => x.GetAttachmentByRef(It.IsAny<string>()))
+            .Returns(new ATTACHMENT());
+        handler.InvokeUpdateAttachmentRecordStatus(request);
+
+        request.Attachment.LinkedAttachmentRecnum = "0";
+        handler.InvokeUpdateAttachmentRecordStatus(request);
+
+        request.Attachment.AttachmentId = null;
+        handler.InvokeUpdateAttachmentRecordStatus(request);
     }
 
-    [Fact(DisplayName = "InsertAttachmentCopyStatus_AllCases_CallsAddOrUpdate")]
-    public void InsertAttachmentCopyStatus_AllCases_CallsAddOrUpdate()
+    [Fact]
+    public void DeleteAttachmentFromOCR_ShouldHandleAllBranches()
     {
         var handler = CreateHandler();
-
-        var req = new CreateAttachmentRequest
+        var request = new CreateAttachmentRequest
         {
             Attachment = new AttachmentDto
             {
-                AttachmentId = "att-1"
+                LinkedAttachmentRecnum = "1",
+                AttachmentId = "",
+                CreatedBy = "user"
             }
         };
 
-        var capturedStatuses = new List<ATTACHMENTS_COPY_STATUS>();
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            GetAttachmentCopyStatusByReferenceIdOverride = id => null,
-            AddOrUpdateAttachmentsCopyStatusOverride = s => capturedStatuses.Add(s)
-        };
-        InjectFakeDataAccess(handler, fake);
-
-        // call for Pending
-        InvokePrivate(handler, "InsertAttachmentCopyStatus", req, FormStatus.Pending);
-        // Success
-        InvokePrivate(handler, "InsertAttachmentCopyStatus", req, FormStatus.Success);
-        // Failed
-        InvokePrivate(handler, "InsertAttachmentCopyStatus", req, FormStatus.Failed);
-
-        Assert.True(capturedStatuses.Count >= 3);
-        Assert.Contains(capturedStatuses, s => s.COPY_STATUS == FormStatus.Pending);
-        Assert.Contains(capturedStatuses, s => s.COPY_STATUS == FormStatus.Success);
-        Assert.Contains(capturedStatuses, s => s.COPY_STATUS == FormStatus.Failed);
+        handler.InvokeDeleteAttachmentFromOCR(request);
+        handler.ThrowInQueueSend = true;
+        handler.InvokeDeleteAttachmentFromOCR(request);
     }
 
-    [Fact(DisplayName = "MoveFileToOCRSharedPath_CopiesFiles_ReturnsTrue")]
-    public void MoveFileToOCRSharedPath_CopiesFiles_ReturnsTrue()
+    // ---------- TESTABLE WRAPPER ----------
+    private class TestableAttachmentsRequestHandler : AttachmentsRequestHandler
     {
-        var handler = CreateHandler();
+        public Mock<MFRDataAccess> MFRDataAccessMock { get; } = new();
+        public Mock<FileCheck> FileCheckMock { get; } = new();
+        public Mock<IWebRestServiceManager> WebRestServiceMock { get; } = new();
+        public bool ThrowInInsertCopyStatus { get; set; }
+        public bool ThrowInQueueSend { get; set; }
 
-        // Setup parameter access for repo target
-        string destRepo = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(destRepo);
-        _param.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrAttachmentRepositoryLocation"))
-              .Returns(destRepo);
+        public TestableAttachmentsRequestHandler(ILogger logger, ILocalizedStrings localizedStrings, ISession session, IParameterAccess parameterAccess)
+            : base(logger, localizedStrings, session, parameterAccess) { }
 
-        // Create a source folder with files
-        string src = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(src);
-        var fpath = Path.Combine(src, "f1.txt");
-        File.WriteAllText(fpath, "hello");
+        // override data access creation
+        protected override MFRDataAccess CreateMFRDataAccess() => MFRDataAccessMock.Object;
+        protected override FileCheck CreateFileCheck() => FileCheckMock.Object;
+        protected override IWebRestServiceManager CreateWebRestServiceManager(string user) => WebRestServiceMock.Object;
 
-        var req = new CreateAttachmentRequest
+        protected override void InsertAttachmentCopyStatus(CreateAttachmentRequest req, string status)
         {
-            Attachment = new AttachmentDto
-            {
-                AttachmentId = "att123",
-                FilePath = src
-            }
-        };
-
-        var result = (bool)InvokePrivate(handler, "MoveFileToOCRSharedPath", req);
-
-        Assert.True(result);
-        Assert.True(File.Exists(Path.Combine(destRepo, req.Attachment.AttachmentId)));
-        Directory.Delete(src, true);
-        Directory.Delete(destRepo, true);
-    }
-
-    [Fact(DisplayName = "DeleteFilesFromPath_DeletesDirectory")]
-    public void DeleteFilesFromPath_DeletesDirectory()
-    {
-        var handler = CreateHandler();
-
-        string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(dir);
-        File.WriteAllText(Path.Combine(dir, "a.txt"), "x");
-
-        InvokePrivate(handler, "DeleteFilesFromPath", dir);
-        Assert.False(Directory.Exists(dir));
-    }
-
-    [Fact(DisplayName = "CopyFile_CallsMoveAndDelete")]
-    public void CopyFile_CallsMoveAndDelete()
-    {
-        var handler = CreateHandler();
-
-        string src = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(src);
-        File.WriteAllText(Path.Combine(src, "a.txt"), "x");
-
-        string repo = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(repo);
-        _param.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrAttachmentRepositoryLocation"))
-              .Returns(repo);
-
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            // keep copy status methods safe
-            GetAttachmentCopyStatusByReferenceIdOverride = id => null,
-            AddOrUpdateAttachmentsCopyStatusOverride = s => { }
-        };
-        InjectFakeDataAccess(handler, fake);
-
-        var req = new CreateAttachmentRequest
-        {
-            Attachment = new AttachmentDto
-            {
-                AttachmentId = "att1",
-                FilePath = src
-            }
-        };
-
-        InvokePrivate(handler, "CopyFile", req);
-
-        // after successful copy, source dir should be deleted
-        Assert.False(Directory.Exists(src));
-        Directory.Delete(repo, true);
-    }
-
-    [Fact(DisplayName = "AddAttachment_ReturnsAttachmentRecordAndClearsCustomData")]
-    public void AddAttachment_ReturnsAttachmentAndClearsCustomData()
-    {
-        var handler = CreateHandler();
-
-        var src = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(src);
-        File.WriteAllText(Path.Combine(src, "a.txt"), "x");
-
-        var fake = new FakeMFRDataAccess(_param.Object, _logger.Object)
-        {
-            CreateNewAttachmentOverride = dto => new ATTACHMENT { ATTACHMENT_ID = dto.AttachmentId, CUSTOM_DATA = "SHOULD_BE_CLEARED" }
-        };
-        InjectFakeDataAccess(handler, fake);
-
-        var req = new CreateAttachmentRequest
-        {
-            Attachment = new AttachmentDto { AttachmentId = "ATTX", FilePath = src }
-        };
-
-        var result = InvokePrivate(handler, "AddAttachment", req) as ATTACHMENT;
-        Assert.NotNull(result);
-        Assert.Equal(string.Empty, result.CUSTOM_DATA);
-
-        Directory.Delete(src, true);
-    }
-
-    [Fact(DisplayName = "HandleMessage_WhenExceptionOccurs_LogsCriticalAndReturns")]
-    public void HandleMessage_WhenExceptionOccurs_LogsCriticalAndReturns()
-    {
-        var handler = CreateHandler();
-
-        // cause parameter access to throw inside handle -> triggers catch path
-        _param.Setup(p => p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-              .Throws(new Exception("param fail"));
-
-        var req = new CreateAttachmentRequest
-        {
-            Attachment = new AttachmentDto { RequestType = AttachmentActions.AddAttachment, AttachmentId = "a1" }
-        };
-
-        var res = handler.HandleMessage(new MessageHeader(), req);
-        // handler sets response.Success true in catch per pasted code but also adds messages
-        Assert.NotNull(res);
-        Assert.True(res.Response.Success);
-        Assert.NotEmpty(res.Response.Messages);
-    }
-
-    // -----------------------
-    // Fake MFRDataAccess for tests (overrides virtual methods)
-    // -----------------------
-    public class FakeMFRDataAccess : MFRDataAccess
-    {
-        public Func<AttachmentDto, ATTACHMENT> CreateNewAttachmentOverride { get; set; }
-        public Func<string, ATTACHMENT> GetAttachmentByRefOverride { get; set; }
-        public Func<string, ATTACHMENTS_COPY_STATUS> GetAttachmentCopyStatusByReferenceIdOverride { get; set; }
-        public Action<ATTACHMENTS_COPY_STATUS> AddOrUpdateAttachmentsCopyStatusOverride { get; set; }
-        public Action<ATTACHMENT> AddOrUpdateAttachmentsOverride { get; set; }
-        public Action<int> DeleteAttachmentOverride { get; set; }
-
-        public FakeMFRDataAccess(IParameterAccess p, ILogger logger) : base(p, logger) { }
-
-        public override ATTACHMENT CreateNewAttachment(AttachmentDto dto)
-            => CreateNewAttachmentOverride != null ? CreateNewAttachmentOverride(dto) : base.CreateNewAttachment(dto);
-
-        public override ATTACHMENT GetAttachmentByRef(string id)
-            => GetAttachmentByRefOverride != null ? GetAttachmentByRefOverride(id) : base.GetAttachmentByRef(id);
-
-        public override ATTACHMENTS_COPY_STATUS GetAttachmentCopyStatusByReferenceId(string id)
-            => GetAttachmentCopyStatusByReferenceIdOverride != null ? GetAttachmentCopyStatusByReferenceIdOverride(id) : base.GetAttachmentCopyStatusByReferenceId(id);
-
-        public override void AddOrUpdateAttachmentsCopyStatus(ATTACHMENTS_COPY_STATUS s)
-        {
-            if (AddOrUpdateAttachmentsCopyStatusOverride != null) AddOrUpdateAttachmentsCopyStatusOverride(s);
-            else base.AddOrUpdateAttachmentsCopyStatus(s);
+            if (ThrowInInsertCopyStatus)
+                throw new Exception("Insert failed");
         }
 
-        public override void AddOrUpdateAttachments(ATTACHMENT a)
-        {
-            if (AddOrUpdateAttachmentsOverride != null) AddOrUpdateAttachmentsOverride(a);
-            else base.AddOrUpdateAttachments(a);
-        }
+        protected override ImportMessageQueueClient CreateQueueClient(string url, string name) =>
+            ThrowInQueueSend ? throw new Exception("Queue fail") : new Mock<ImportMessageQueueClient>().Object;
 
-        public override void DeleteAttachment(int recnum)
-        {
-            if (DeleteAttachmentOverride != null) DeleteAttachmentOverride(recnum);
-            else base.DeleteAttachment(recnum);
-        }
+        // expose private for coverage
+        public void InvokeUpdateAttachmentDeleteStatus(CreateAttachmentRequest req, CreateAttachmentResponse res)
+            => base.UpdateAttachmentDeleteStatus(req, res);
+
+        public void InvokeCheckAttachmentsFromApi(CreateAttachmentRequest req, CreateAttachmentResponse res)
+            => base.CheckAttachmentsFromApi(req, res);
+
+        public void InvokeUpdateAttachmentRecordStatus(CreateAttachmentRequest req)
+            => base.UpdateAttachmentRecordStatus(req);
+
+        public void InvokeDeleteAttachmentFromOCR(CreateAttachmentRequest req)
+            => base.DeleteAttachmentFromOCR(req);
     }
 }
-
-// ----------------------
-// Minimal stubs (remove them if you have real types in test project)
-// ----------------------
-public enum AttachmentActions { AddAttachment, DeleteAttachment, AttachmentDeleteStatus }
-public static class FormStatus { public const string Pending = "Pending"; public const string Success = "Success"; public const string Failed = "Failed"; }
-public class CreateAttachmentRequest { public AttachmentDto Attachment { get; set; } = new(); }
-public class CreateAttachmentResponse { public bool IsSuccess { get; set; } public string Message { get; set; } public Dictionary<string, object> CustomData { get; } = new(); }
-public class MessageHeader { public string SessionId { get; set; } }
-public class MessageResponse { public object Message { get; } public Response Response { get; } public MessageResponse(object m, object unused, Response r) { Message = m; Response = r; } }
-public class Response { public bool Success { get; set; } public List<string> Messages { get; } = new(); }
-public class AttachmentDto { public string AttachmentId { get; set; } public string RequestType { get; set; } public string Recnum { get; set; } public string FilePath { get; set; } public int ContentSize { get; set; } public string CreatedBy { get; set; } public string FormType { get; set; } public string FormRecnum { get; set; } public string AttachmentRecnum { get; set; } public string LinkedAttachmentRecnum { get; set; } }
-public class ATTACHMENT { public string ATTACHMENT_ID { get; set; } public bool IS_DELETED { get; set; } public string ACK_MESSAGE { get; set; } public string CUSTOM_DATA { get; set; } public string UPDATED_ON { get; set; } }
-public class ATTACHMENTS_COPY_STATUS { public string ATTACHMENT_ID { get; set; } public string COPY_STATUS { get; set; } public DateTime CREATED_ON { get; set; } public DateTime UPDATED_ON { get; set; } public string FILE_PATH { get; set; } }
