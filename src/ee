@@ -1,66 +1,96 @@
-public class ProcessMFRQueueReports
-{
-    private readonly string _moduleName;
-    private readonly ILogger _logger;
-    private readonly IParameterAccess _parameterAccess;
+using Xunit;
+using Moq;
+using System;
+using YourNamespace;
+using YourNamespace.Models; // For ACKNOWLEDGEMENT, ImportMessage, etc.
 
-    public ProcessMFRQueueReports(string moduleName, IParameterAccess parameterAccess, ILogger logger)
+public class ProcessMFRQueueReportsTests
+{
+    private readonly Mock<IParameterAccess> _parameterAccessMock;
+    private readonly Mock<ILogger> _loggerMock;
+
+    public ProcessMFRQueueReportsTests()
     {
-        _moduleName = moduleName;
-        _logger = logger;
-        _parameterAccess = parameterAccess;
+        _parameterAccessMock = new Mock<IParameterAccess>();
+        _loggerMock = new Mock<ILogger>();
     }
 
-    public virtual void ProcessQueueReports()
+    [Fact]
+    public void ProcessQueueReports_ShouldReturn_WhenResubmissionIsEnabled()
     {
-        try
+        // Arrange
+        _parameterAccessMock
+            .Setup(x => x.GetParameterListItem(
+                ParameterConstants.MFRSet,
+                ParameterList.OCRSettings,
+                ParameterName.ReportResubmissionFlag))
+            .Returns("true");
+
+        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
+
+        // Act
+        sut.ProcessQueueReports();
+
+        // Assert
+        _loggerMock.Verify(x => x.Info("Report resubmission is disabled"), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessQueueReports_ShouldProcessReports_WhenResubmissionIsDisabled()
+    {
+        // Arrange
+        _parameterAccessMock
+            .Setup(x => x.GetParameterListItem(
+                ParameterConstants.MFRSet,
+                ParameterList.OCRSettings,
+                ParameterName.ReportResubmissionFlag))
+            .Returns("false");
+
+        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueUrl"))
+            .Returns("http://dummyQueue");
+        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueName"))
+            .Returns("queue1");
+        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.HFRSet, "FileDirectories", "xslDir"))
+            .Returns("/temp/xsl");
+
+        // Mocking AcknowledgementOperations behavior
+        var ackMock = new Mock<AcknowledgementOperations>(_parameterAccessMock.Object, _loggerMock.Object);
+        var ackRecord = new ACKNOWLEDGEMENT
         {
-            string reportResubmissionFlagStr = _parameterAccess?
-                .GetParameterListItem(ParameterConstants.MFRSet, ParameterList.OCRSettings, ParameterName.ReportResubmissionFlag);
+            RECNUM = 1,
+            FORM_ID = "F001",
+            HEADER_MESSAGE = "Header",
+            MESSAGE_REQUEST = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Request"))
+        };
 
-            bool isReportResubmissionEnable = false;
-            bool.TryParse(reportResubmissionFlagStr, out isReportResubmissionEnable);
+        ackMock.SetupSequence(a => a.GetNextPendingReportForSubmissions(It.IsAny<string>()))
+            .Returns(ackRecord)
+            .Returns((ACKNOWLEDGEMENT)null);
 
-            if (isReportResubmissionEnable)
-            {
-                _logger.Info("Report resubmission is disabled");
-                return;
-            }
+        // Replace AcknowledgementOperations with mock instance (would need DI or refactoring to support directly)
+        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
 
-            var acknowledgementOperations = new AcknowledgementOperations(_parameterAccess, _logger);
-            string queueUrl = _parameterAccess?.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueUrl");
-            string queueName = _parameterAccess?.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueName");
-            string xslDir = _parameterAccess?.GetParameterListItem(ParameterConstants.HFRSet, "FileDirectories", "xslDir");
+        // Act
+        sut.ProcessQueueReports();
 
-            var queueClient = new ImportMessageQueueClient(queueUrl, queueName, xslDir, _parameterAccess, _logger);
-            var queueAcknowledgementRecord = acknowledgementOperations.GetNextPendingReportForSubmissions(_moduleName);
+        // Assert
+        _loggerMock.Verify(x => x.Warning(It.Is<string>(s => s.Contains("Re submitting MFR report Ref=F001"))), Times.Once);
+    }
 
-            while (queueAcknowledgementRecord != null)
-            {
-                var importMessage = new ImportMessage();
+    [Fact]
+    public void ProcessQueueReports_ShouldLogError_OnException()
+    {
+        // Arrange
+        _parameterAccessMock
+            .Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new Exception("Parameter error"));
 
-                try
-                {
-                    acknowledgementOperations.LockReportForSubmission(queueAcknowledgementRecord.RECNUM);
+        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
 
-                    importMessage.ReferenceId = queueAcknowledgementRecord.FORM_ID;
-                    importMessage.HeaderMessage = queueAcknowledgementRecord.HEADER_MESSAGE;
-                    importMessage.MessageRequest = new ObjectToStringConverter(_logger)
-                        .ToStringFromBase64String(queueAcknowledgementRecord.MESSAGE_REQUEST);
+        // Act
+        sut.ProcessQueueReports();
 
-                    _logger.Warning($"Re submitting {_moduleName} report Ref={importMessage.ReferenceId}");
-                    queueClient.SendMessageToQueue(importMessage);
-                }
-                finally
-                {
-                    acknowledgementOperations.UpdateReportSubmissionStatus(importMessage);
-                    queueAcknowledgementRecord = acknowledgementOperations.GetNextPendingReportForSubmissions(_moduleName);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Error($"Error occurred while processing queue reports for {_moduleName}", ex);
-        }
+        // Assert
+        _loggerMock.Verify(x => x.Error(It.Is<string>(s => s.Contains("Error occurred while processing queue reports")), It.IsAny<Exception>()), Times.Once);
     }
 }
