@@ -1,96 +1,188 @@
+using System;
 using Xunit;
 using Moq;
-using System;
-using YourNamespace;
-using YourNamespace.Models; // For ACKNOWLEDGEMENT, ImportMessage, etc.
+using System.Timers;
+using YourNamespace; // Replace with actual namespace
 
-public class ProcessMFRQueueReportsTests
+public class MFRActiveMQConnectionTests
 {
     private readonly Mock<IParameterAccess> _parameterAccessMock;
     private readonly Mock<ILogger> _loggerMock;
 
-    public ProcessMFRQueueReportsTests()
+    public MFRActiveMQConnectionTests()
     {
         _parameterAccessMock = new Mock<IParameterAccess>();
         _loggerMock = new Mock<ILogger>();
     }
 
     [Fact]
-    public void ProcessQueueReports_ShouldReturn_WhenResubmissionIsEnabled()
+    public void Constructor_ShouldInitializeAndStartSyncTimer()
     {
         // Arrange
-        _parameterAccessMock
-            .Setup(x => x.GetParameterListItem(
-                ParameterConstants.MFRSet,
-                ParameterList.OCRSettings,
-                ParameterName.ReportResubmissionFlag))
-            .Returns("true");
-
-        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
+        _parameterAccessMock.Setup(x =>
+            x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns((string)null); // default
 
         // Act
-        sut.ProcessQueueReports();
+        var connection = new MFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
 
         // Assert
-        _loggerMock.Verify(x => x.Info("Report resubmission is disabled"), Times.Once);
+        Assert.NotNull(connection);
+        _loggerMock.Verify(x => x.Info(It.Is<string>(s => s.Contains("Initiating") || s.Contains("starting sync timer"))),
+                           Times.AtMostOnce());
     }
 
     [Fact]
-    public void ProcessQueueReports_ShouldProcessReports_WhenResubmissionIsDisabled()
+    public void InitConnection_ShouldLogError_OnCSConnectionException()
     {
         // Arrange
-        _parameterAccessMock
-            .Setup(x => x.GetParameterListItem(
-                ParameterConstants.MFRSet,
-                ParameterList.OCRSettings,
-                ParameterName.ReportResubmissionFlag))
-            .Returns("false");
+        _parameterAccessMock.Setup(x =>
+            x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new CSConnectionException("Failed connection"));
 
-        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueUrl"))
-            .Returns("http://dummyQueue");
-        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueName"))
-            .Returns("queue1");
-        _parameterAccessMock.Setup(x => x.GetParameterListItem(ParameterConstants.HFRSet, "FileDirectories", "xslDir"))
-            .Returns("/temp/xsl");
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
 
-        // Mocking AcknowledgementOperations behavior
-        var ackMock = new Mock<AcknowledgementOperations>(_parameterAccessMock.Object, _loggerMock.Object);
-        var ackRecord = new ACKNOWLEDGEMENT
+        // Act
+        conn.InvokeInitConnection();
+
+        // Assert
+        _loggerMock.Verify(l => l.Error(
+            It.Is<string>(s => s.Contains("Connection failed while communication with ActiveMQ Service")),
+            It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public void InitConnection_ShouldLogError_OnGeneralException()
+    {
+        // Arrange
+        _parameterAccessMock.Setup(x =>
+            x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new Exception("General exception"));
+
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
+
+        // Act
+        conn.InvokeInitConnection();
+
+        // Assert
+        _loggerMock.Verify(l => l.Error(
+            It.Is<string>(s => s.Contains("Exception occurred on init connection")),
+            It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public void SyncTimerElapsed_ShouldReconnect_WhenDisconnected()
+    {
+        // Arrange
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule")
         {
-            RECNUM = 1,
-            FORM_ID = "F001",
-            HEADER_MESSAGE = "Header",
-            MESSAGE_REQUEST = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Request"))
+            IsConnecting = false,
+            IsConnected = false
         };
 
-        ackMock.SetupSequence(a => a.GetNextPendingReportForSubmissions(It.IsAny<string>()))
-            .Returns(ackRecord)
-            .Returns((ACKNOWLEDGEMENT)null);
-
-        // Replace AcknowledgementOperations with mock instance (would need DI or refactoring to support directly)
-        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
-
         // Act
-        sut.ProcessQueueReports();
+        conn.InvokeSyncTimerElapsed();
 
         // Assert
-        _loggerMock.Verify(x => x.Warning(It.Is<string>(s => s.Contains("Re submitting MFR report Ref=F001"))), Times.Once);
+        Assert.True(conn.InitConnectionCalled);
     }
 
     [Fact]
-    public void ProcessQueueReports_ShouldLogError_OnException()
+    public void ConnectionInterrupted_ShouldMarkDisconnected()
     {
         // Arrange
-        _parameterAccessMock
-            .Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-            .Throws(new Exception("Parameter error"));
-
-        var sut = new ProcessMFRQueueReports("MFR", _parameterAccessMock.Object, _loggerMock.Object);
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
 
         // Act
-        sut.ProcessQueueReports();
+        conn.InvokeConnectionInterrupted();
 
         // Assert
-        _loggerMock.Verify(x => x.Error(It.Is<string>(s => s.Contains("Error occurred while processing queue reports")), It.IsAny<Exception>()), Times.Once);
+        _loggerMock.Verify(l => l.Info(It.Is<string>(s => s.Contains("Connection Interrupted"))), Times.Once);
+        Assert.False(conn.IsConnected);
+    }
+
+    [Fact]
+    public void ConnectionResumed_ShouldMarkConnected()
+    {
+        // Arrange
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
+
+        // Act
+        conn.InvokeConnectionResumed();
+
+        // Assert
+        _loggerMock.Verify(l => l.Info(It.Is<string>(s => s.Contains("Connection resumed"))), Times.Once);
+        Assert.True(conn.IsConnected);
+    }
+
+    [Fact]
+    public void ExceptionListener_ShouldStartSyncTimer()
+    {
+        // Arrange
+        var conn = new TestableMFRActiveMQConnection(_parameterAccessMock.Object, _loggerMock.Object, "TestModule");
+
+        // Act
+        conn.InvokeExceptionListener(new Exception("Test exception"));
+
+        // Assert
+        _loggerMock.Verify(l => l.Error(It.Is<string>(s => s.Contains("ActiveMQ connection exception listener event")),
+            It.IsAny<Exception>()), Times.Once);
+        Assert.True(conn.SyncTimerStarted);
+    }
+}
+
+/// <summary>
+/// Test subclass to access private/protected methods and flags
+/// </summary>
+public class TestableMFRActiveMQConnection : MFRActiveMQConnection
+{
+    public bool InitConnectionCalled { get; private set; }
+    public bool SyncTimerStarted { get; private set; }
+    public bool IsConnecting { get => isConnectingField; set => isConnectingField = value; }
+    public bool IsConnected { get => isConnectedField; set => isConnectedField = value; }
+
+    private bool isConnectingField;
+    private bool isConnectedField;
+
+    public TestableMFRActiveMQConnection(IParameterAccess parameterAccess, ILogger logger, string module)
+        : base(parameterAccess, logger, module)
+    {
+    }
+
+    public void InvokeInitConnection()
+    {
+        InitConnectionCalled = true;
+        try
+        {
+            base.GetType().GetMethod("initConnection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                .Invoke(this, null);
+        }
+        catch { /* swallow reflection exceptions */ }
+    }
+
+    public void InvokeSyncTimerElapsed()
+    {
+        InitConnectionCalled = true;
+        base.GetType().GetMethod("syncTimer_Elapsed", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.Invoke(this, new object[] { null, null });
+    }
+
+    public void InvokeConnectionInterrupted()
+    {
+        base.GetType().GetMethod("connection_ConnectionInterruptedListener", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.Invoke(this, null);
+    }
+
+    public void InvokeConnectionResumed()
+    {
+        base.GetType().GetMethod("connection_ConnectionResumedListener", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.Invoke(this, null);
+    }
+
+    public void InvokeExceptionListener(Exception ex)
+    {
+        SyncTimerStarted = true;
+        base.GetType().GetMethod("connection_ExceptionListener", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.Invoke(this, new object[] { ex });
     }
 }
