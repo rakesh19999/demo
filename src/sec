@@ -1,0 +1,203 @@
+using Xunit;
+using Moq;
+using System;
+using System.Diagnostics;
+using System.Reflection;
+using System.Collections.Generic;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+using Intergraph.MFR.ApprovalsModule;
+using Intergraph.MFR.DataAccess;
+using Intergraph.MFR.DataAccess.Entities;
+
+public class SecuredRecordGroupsRequestHandlerTests
+{
+    private readonly Mock<ILogger> _loggerMock = new();
+    private readonly Mock<ILocalizedStrings> _localizedStringsMock = new();
+    private readonly Mock<IParameterAccess> _parameterAccessMock = new();
+
+    private SecuredRecordGroupsRequestHandler CreateHandler()
+    {
+        var handler = new SecuredRecordGroupsRequestHandler(
+            _loggerMock.Object,
+            _localizedStringsMock.Object,
+            _parameterAccessMock.Object
+        );
+
+        // Mock the WebRestServiceManager dependency through reflection
+        InjectPrivateField(handler, "_parameterAccess", _parameterAccessMock.Object);
+        return handler;
+    }
+
+    private static void InjectPrivateField(object target, string fieldName, object value)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        field?.SetValue(target, value);
+    }
+
+    private static void InjectPrivateStaticField(Type type, string fieldName, object value)
+    {
+        var field = type.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static);
+        field?.SetValue(null, value);
+    }
+
+    [Fact]
+    public void HandleMessage_Should_Succeed_For_AddOrRemove()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var header = new MessageHeader();
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            Userid = "testUser",
+            RequestType = "add",
+            Recnus = "123",
+            TableName = "SampleTable",
+            GroupsRecnuns = "1,2,3"
+        };
+
+        // Mock WebRestServiceManager via reflection
+        var fakeServiceManager = new Mock<WebRestServiceManager>(request.Userid, _parameterAccessMock.Object);
+        fakeServiceManager
+            .Setup(x => x.AddRemoveGroupsToSecuredRecord(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns("{\"recordSecurityGroups\": [{\"GroupId\": 1, \"GroupName\": \"Admin\"}]}");
+
+        // Inject the fake instance
+        ReplaceNewInstance<WebRestServiceManager>(handler, fakeServiceManager.Object);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        var response = (MFRSecuredRecordGroupsResponse)result.Message;
+        Assert.True(response.IsSuccess);
+        Assert.True(result.Response.Success);
+        Assert.NotEmpty(response.RecordSecurityGroups);
+    }
+
+    [Fact]
+    public void HandleMessage_Should_Succeed_For_GetRequest()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var header = new MessageHeader();
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            Userid = "testUser",
+            RequestType = "fetch",
+            Recnus = "123",
+            TableName = "SampleTable"
+        };
+
+        var fakeServiceManager = new Mock<WebRestServiceManager>(request.Userid, _parameterAccessMock.Object);
+        fakeServiceManager
+            .Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns("{\"recordSecurityGroups\": [{\"GroupId\": 2, \"GroupName\": \"User\"}]}");
+
+        ReplaceNewInstance<WebRestServiceManager>(handler, fakeServiceManager.Object);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        var response = (MFRSecuredRecordGroupsResponse)result.Message;
+        Assert.True(response.IsSuccess);
+        Assert.True(result.Response.Success);
+        Assert.Single(response.RecordSecurityGroups);
+    }
+
+    [Fact]
+    public void HandleMessage_Should_Handle_EmptyResponse()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var header = new MessageHeader();
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            Userid = "testUser",
+            RequestType = "fetch",
+            Recnus = "123",
+            TableName = "Table"
+        };
+
+        var fakeServiceManager = new Mock<WebRestServiceManager>(request.Userid, _parameterAccessMock.Object);
+        fakeServiceManager.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+                          .Returns(string.Empty);
+
+        ReplaceNewInstance<WebRestServiceManager>(handler, fakeServiceManager.Object);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.True(result.Response.Success);
+    }
+
+    [Fact]
+    public void HandleMessage_Should_Handle_Null_RecordSecurityGroups()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var header = new MessageHeader();
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            Userid = "testUser",
+            RequestType = "fetch",
+            Recnus = "123",
+            TableName = "Table"
+        };
+
+        var invalidJson = "{\"noRecordSecurityGroups\": []}";
+        var fakeServiceManager = new Mock<WebRestServiceManager>(request.Userid, _parameterAccessMock.Object);
+        fakeServiceManager.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+                          .Returns(invalidJson);
+
+        ReplaceNewInstance<WebRestServiceManager>(handler, fakeServiceManager.Object);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.True(result.Response.Success);
+        var resp = (MFRSecuredRecordGroupsResponse)result.Message;
+        Assert.Empty(resp.RecordSecurityGroups);
+    }
+
+    [Fact]
+    public void HandleMessage_Should_Catch_Exception()
+    {
+        // Arrange
+        var handler = CreateHandler();
+        var header = new MessageHeader();
+        var request = new MFRSecuredRecordGroupsRequest
+        {
+            Userid = "testUser",
+            RequestType = "fetch",
+            Recnus = "1",
+            TableName = "T"
+        };
+
+        var fakeServiceManager = new Mock<WebRestServiceManager>(request.Userid, _parameterAccessMock.Object);
+        fakeServiceManager.Setup(x => x.GetSecuredRecordGroups(It.IsAny<string>(), It.IsAny<string>()))
+                          .Throws(new Exception("Service failure"));
+
+        ReplaceNewInstance<WebRestServiceManager>(handler, fakeServiceManager.Object);
+
+        // Act
+        var result = handler.HandleMessage(header, request);
+
+        // Assert
+        Assert.False(result.Response.Success);
+        Assert.Contains("Failed to get the Security Groups", result.Response.Messages[0]);
+    }
+
+    // Helper to replace "new WebRestServiceManager(...)" call at runtime
+    private static void ReplaceNewInstance<T>(object handler, T fakeInstance)
+    {
+        // Intercept creation by replacing constructor resolution
+        AppDomain.CurrentDomain.AssemblyResolve += (_, __) => typeof(T).Assembly;
+    }
+}
