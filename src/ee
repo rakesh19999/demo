@@ -1,224 +1,66 @@
-using System;
-using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Xml;
-using System.Xml.Linq;
-using Moq;
-using Xunit;
-
-// If ImportMessageQueueClient is in a namespace, add it here:
-// using Your.Project.Namespace;
-
-public class ImportMessageQueueClientTests
+public class ProcessMFRQueueReports
 {
-    // Replace these with the actual interface/ILogger type namespaces if needed:
-    // IParameterAccess and ILogger are used from your pasted code.
-    // The tests assume those interfaces exist in the production assembly.
+    private readonly string _moduleName;
+    private readonly ILogger _logger;
+    private readonly IParameterAccess _parameterAccess;
 
-    [Fact]
-    public void Base64Encode_WithText_ReturnsExpectedBase64()
+    public ProcessMFRQueueReports(string moduleName, IParameterAccess parameterAccess, ILogger logger)
     {
-        // Arrange
-        var client = new ImportMessageQueueClient("http://dummy");
-
-        // Act
-        var encoded = client.base64Encode("hello");
-
-        // Assert
-        var expected = Convert.ToBase64String(Encoding.UTF8.GetBytes("hello"));
-        Assert.Equal(expected, encoded);
+        _moduleName = moduleName;
+        _logger = logger;
+        _parameterAccess = parameterAccess;
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    public void Base64Encode_NullOrEmpty_ReturnsEmptyString(string input)
+    public virtual void ProcessQueueReports()
     {
-        var client = new ImportMessageQueueClient("http://dummy");
-
-        var encoded = client.base64Encode(input);
-
-        Assert.Equal(string.Empty, encoded);
-    }
-
-    [Fact]
-    public void Base64DecodeToString_ValidBase64_ReturnsOriginal()
-    {
-        var original = "some text with ünicode";
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(original));
-
-        var decoded = ImportMessageQueueClient.base64DecodeToString(encoded);
-
-        Assert.Equal(original, decoded);
-    }
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    public void Base64DecodeToString_NullOrEmpty_ReturnsEmpty(string input)
-    {
-        var decoded = ImportMessageQueueClient.base64DecodeToString(input);
-        Assert.Equal(string.Empty, decoded);
-    }
-
-    [Fact]
-    public void CreateExportRequestMessage_ReturnsExpectedXml()
-    {
-        // You pasted a method named "greateExportRequestMessage" - test for "CreateExportRequestMessage" behavior.
-        var client = new ImportMessageQueueClient("http://dummy");
-
-        var result = InvokePrivateCreateExportRequestMessage(client, "MyKey", "MyValue");
-
-        // expected small xml fragment
-        var expected =
-            "<ExportRequest>" +
-                "<FieldName>MyKey</FieldName>" +
-                "<FieldValue>MyValue</FieldValue>" +
-            "</ExportRequest>";
-
-        // Normalizing whitespace - compare without whitespace issues
-        Assert.Equal(NormalizeXml(expected), NormalizeXml(result));
-    }
-
-    [Fact]
-    public void CheckNeededParameters_ThrowsForNulls()
-    {
-        var client = new ImportMessageQueueClient("http://dummy");
-
-        // The method signature in pasted code: checkNeededParameters(string inputXml, string formType, string submitterId, string agencyId)
-        // Use reflection to get the private method and invoke.
-        var method = client.GetType().GetMethod("checkNeededParameters", BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.NotNull(method);
-
-        // Test inputXml null
-        var ex1 = Assert.Throws<TargetInvocationException>(() => method.Invoke(client, new object[] { null, "Form", "Submitter", "Agency" }));
-        Assert.IsType<ArgumentNullException>(ex1.InnerException);
-
-        // Test formType null
-        var ex2 = Assert.Throws<TargetInvocationException>(() => method.Invoke(client, new object[] { "<xml />", null, "Submitter", "Agency" }));
-        Assert.IsType<ArgumentNullException>(ex2.InnerException);
-
-        // Test submitterId null
-        var ex3 = Assert.Throws<TargetInvocationException>(() => method.Invoke(client, new object[] { "<xml />", "Form", null, "Agency" }));
-        Assert.IsType<ArgumentNullException>(ex3.InnerException);
-
-        // Test agencyId null
-        var ex4 = Assert.Throws<TargetInvocationException>(() => method.Invoke(client, new object[] { "<xml />", "Form", "Submitter", null }));
-        Assert.IsType<ArgumentNullException>(ex4.InnerException);
-
-        // Finally, all non-null should not throw
-        var invocation = method.Invoke(client, new object[] { "<xml />", "Form", "Submitter", "Agency" });
-        Assert.Null(invocation); // method returns void -> null
-    }
-
-    [Fact]
-    public void TransformXml_PerformsXslTransform_WithTempXsl()
-    {
-        // Arrange
-        var client = new ImportMessageQueueClient("http://dummy");
-
-        // We'll create a simple XSL that transforms <input><name>... to <output><name>...
-        string xslContent = @"<?xml version=""1.0"" encoding=""utf-8""?>
-<xsl:stylesheet version=""1.0"" xmlns:xsl=""http://www.w3.org/1999/XSL/Transform"">
-  <xsl:output method=""xml"" indent=""no"" encoding=""utf-8""/>
-  <xsl:template match=""/"">
-    <output>
-      <xsl:apply-templates/>
-    </output>
-  </xsl:template>
-
-  <xsl:template match=""name"">
-    <name><xsl:value-of select=""text()""/></name>
-  </xsl:template>
-</xsl:stylesheet>";
-
-        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-
-        var fileName = "TestForm-XslFileName.xsl";
-        var xslPath = Path.Combine(tempDir, fileName);
-        File.WriteAllText(xslPath, xslContent, Encoding.UTF8);
-
-        // Setup a mock parameterAccess that returns the xsl filename when asked.
-        var paramMockType = client.GetType().Assembly.GetType("IParameterAccess") ?? typeof(object); 
-        // We will use Moq with a dynamic interface if the real IParameterAccess exists; otherwise we will set the parameter access object via reflection to a small helper.
-
-        // If real IParameterAccess is available in assembly, use Moq; else set a tiny duck-typed object via reflection isn't feasible, so instead set the parameterAccess field to null and set xslDir directly.
-        var paramField = client.GetType().GetField("parameterAccess", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (paramField != null)
+        try
         {
-            // Create a simple mock using Moq if interface type can be found
-            var ifType = paramField.FieldType;
-            if (ifType != typeof(object))
+            string reportResubmissionFlagStr = _parameterAccess?
+                .GetParameterListItem(ParameterConstants.MFRSet, ParameterList.OCRSettings, ParameterName.ReportResubmissionFlag);
+
+            bool isReportResubmissionEnable = false;
+            bool.TryParse(reportResubmissionFlagStr, out isReportResubmissionEnable);
+
+            if (isReportResubmissionEnable)
             {
-                // Create Moq dynamically: Mock<ifType>
-                var mockType = typeof(Mock<>).MakeGenericType(ifType);
-                var mock = Activator.CreateInstance(mockType);
-                var setupMethod = mockType.GetMethod("Setup", new Type[] { typeof(Func<object>) });
-                // easier: invoke Setup via dynamic: use default Setup with It.IsAny overload is complex; instead use Moq's Setup with reflection for method name GetParameterListItem
-                // We'll use the non-typed approach: set a simple object implementing the interface via Castle / dynamic proxies isn't available here.
+                _logger.Info("Report resubmission is disabled");
+                return;
             }
 
-            // If we can't mock, set parameterAccess to null and set xslDir directly instead.
-            paramField.SetValue(client, null);
+            var acknowledgementOperations = new AcknowledgementOperations(_parameterAccess, _logger);
+            string queueUrl = _parameterAccess?.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueUrl");
+            string queueName = _parameterAccess?.GetParameterListItem(ParameterConstants.MFRSet, "WebRMSUrl", "queueName");
+            string xslDir = _parameterAccess?.GetParameterListItem(ParameterConstants.HFRSet, "FileDirectories", "xslDir");
+
+            var queueClient = new ImportMessageQueueClient(queueUrl, queueName, xslDir, _parameterAccess, _logger);
+            var queueAcknowledgementRecord = acknowledgementOperations.GetNextPendingReportForSubmissions(_moduleName);
+
+            while (queueAcknowledgementRecord != null)
+            {
+                var importMessage = new ImportMessage();
+
+                try
+                {
+                    acknowledgementOperations.LockReportForSubmission(queueAcknowledgementRecord.RECNUM);
+
+                    importMessage.ReferenceId = queueAcknowledgementRecord.FORM_ID;
+                    importMessage.HeaderMessage = queueAcknowledgementRecord.HEADER_MESSAGE;
+                    importMessage.MessageRequest = new ObjectToStringConverter(_logger)
+                        .ToStringFromBase64String(queueAcknowledgementRecord.MESSAGE_REQUEST);
+
+                    _logger.Warning($"Re submitting {_moduleName} report Ref={importMessage.ReferenceId}");
+                    queueClient.SendMessageToQueue(importMessage);
+                }
+                finally
+                {
+                    acknowledgementOperations.UpdateReportSubmissionStatus(importMessage);
+                    queueAcknowledgementRecord = acknowledgementOperations.GetNextPendingReportForSubmissions(_moduleName);
+                }
+            }
         }
-
-        // Set xslDir private field to tempDir
-        var xslDirField = client.GetType().GetField("xslDir", BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.NotNull(xslDirField);
-        xslDirField.SetValue(client, tempDir + Path.DirectorySeparatorChar);
-
-        try
+        catch (Exception ex)
         {
-            // Build input xml
-            var inputXml = "<root><name>john</name></root>";
-
-            // Act
-            var transformed = client.transformXml("TestForm", inputXml);
-
-            // Assert - transformed xml should contain <output><name>john</name></output>
-            Assert.NotNull(transformed);
-            Assert.Contains("<output", transformed);
-            Assert.Contains("<name>john</name>", transformed);
-        }
-        finally
-        {
-            // Cleanup
-            try { Directory.Delete(tempDir, true); } catch { /* ignore */ }
-        }
-    }
-
-    // ---------- Helper methods ----------
-    private static string InvokePrivateCreateExportRequestMessage(object client, string key, string value)
-    {
-        var method = client.GetType().GetMethod("greateExportRequestMessage", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.IgnoreCase)
-                     ?? client.GetType().GetMethod("createExportRequestMessage", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.IgnoreCase);
-
-        if (method == null)
-        {
-            // fallback: attempt to use public method name variations
-            method = client.GetType().GetMethod("CreateExportRequestMessage", BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        }
-
-        if (method == null)
-            throw new InvalidOperationException("Could not find createExportRequestMessage/greateExportRequestMessage method on ImportMessageQueueClient. Adjust test method name to match.");
-
-        var result = method.Invoke(client, new object[] { key, value });
-        return result as string;
-    }
-
-    private static string NormalizeXml(string xml)
-    {
-        try
-        {
-            var doc = XDocument.Parse(xml);
-            return doc.ToString(SaveOptions.DisableFormatting);
-        }
-        catch
-        {
-            // if not valid xml (but should be), fallback to trimming whitespace
-            return xml?.Trim();
+            _logger.Error($"Error occurred while processing queue reports for {_moduleName}", ex);
         }
     }
 }
