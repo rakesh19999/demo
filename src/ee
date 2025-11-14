@@ -1,116 +1,236 @@
 using Xunit;
 using Moq;
 using Apache.NMS;
-using Microsoft.Extensions.Logging;
 using System;
-using Intergraph.HFR.ApprovalsModule; // adjust namespace
-using static Intergraph.HFR.ApprovalsModule.ParameterConstants;
+using System.Text;
+using System.Collections.Generic;
 
 public class ActiveMQSubscribeTopicTests
 {
-    private readonly Mock<IParameterAccess> _mockParameterAccess;
+    private readonly Mock<IParameterAccess> _mockParam;
     private readonly Mock<ILogger> _mockLogger;
-    private readonly Mock<IConnectionFactory> _mockConnectionFactory;
+    private readonly Mock<IConnectionFactory> _mockConnFactory;
     private readonly Mock<IConnection> _mockConnection;
     private readonly Mock<ISession> _mockSession;
     private readonly Mock<IMessageConsumer> _mockConsumer;
 
     public ActiveMQSubscribeTopicTests()
     {
-        _mockParameterAccess = new Mock<IParameterAccess>();
+        _mockParam = new Mock<IParameterAccess>();
         _mockLogger = new Mock<ILogger>();
-        _mockConnectionFactory = new Mock<IConnectionFactory>();
+        _mockConnFactory = new Mock<IConnectionFactory>();
         _mockConnection = new Mock<IConnection>();
         _mockSession = new Mock<ISession>();
         _mockConsumer = new Mock<IMessageConsumer>();
-
-        _mockConnectionFactory
-            .Setup(x => x.CreateConnection())
-            .Returns(_mockConnection.Object);
-
-        _mockConnection
-            .Setup(x => x.CreateSession(It.IsAny<AcknowledgementMode>()))
-            .Returns(_mockSession.Object);
-
-        _mockSession
-            .Setup(x => x.CreateConsumer(It.IsAny<IDestination>(), null))
-            .Returns(_mockConsumer.Object);
     }
 
+    // --------------------------
+    //  CONSTRUCTOR TEST
+    // --------------------------
     [Fact]
-    public void InitConnection_ShouldCreateConnectionAndConsumer()
+    public void Constructor_ShouldInitializeConnection_AndConsumer()
     {
         // Arrange
-        var topicName = "TestTopic";
-        var brokerUri = "tcp://localhost:61616";
-        var outputDir = "C:\\Output";
-        var ackMode = AcknowledgementMode.AutoAcknowledge;
+        SetupConnectionMocks();
 
-        _mockParameterAccess
-            .Setup(x => x.GetParameterListItem(MFRSet, ParameterList.AlertSettings, ParameterName.AlertsTopicName))
-            .Returns("AnotherTopic");
-
-        var sut = new ActiveMQSubscribeTopic(topicName, brokerUri, outputDir, ackMode, _mockParameterAccess.Object, _mockLogger.Object);
+        _mockParam.Setup(x => x.GetParameterListItem("MFRSet", "AlertSettings", "AlertsTopicName"))
+            .Returns("AlertTopic");
 
         // Act
-        var consumer = sut.GetConsumer();
+        var topic = new ActiveMQSubscribeTopicTestable(
+            "AlertTopic",
+            "tcp://localhost:61616",
+            "C:/temp",
+            AcknowledgementMode.AutoAcknowledge,
+            _mockParam.Object,
+            _mockLogger.Object,
+            _mockConnFactory.Object
+        );
 
         // Assert
+        Assert.NotNull(topic.GetConsumer());
+        _mockConnection.Verify(c => c.Start(), Times.Once);
+    }
+
+    // --------------------------
+    //  GetConsumer TEST
+    // --------------------------
+    [Fact]
+    public void GetConsumer_ShouldReturnConsumer()
+    {
+        SetupConnectionMocks();
+
+        var topic = new ActiveMQSubscribeTopicTestable(
+            "TestTopic",
+            "tcp://localhost:61616",
+            "C:/temp",
+            AcknowledgementMode.AutoAcknowledge,
+            _mockParam.Object,
+            _mockLogger.Object,
+            _mockConnFactory.Object
+        );
+
+        var consumer = topic.GetConsumer();
+
         Assert.NotNull(consumer);
     }
 
+    // --------------------------
+    //  Dispose() TEST
+    // --------------------------
     [Fact]
-    public void GetConsumer_ShouldReturnConsumerInstance()
+    public void Dispose_ShouldCloseAllConnections()
     {
-        // Arrange
-        var topicName = "SampleTopic";
-        var brokerUri = "tcp://localhost:61616";
-        var sut = new ActiveMQSubscribeTopic(topicName, brokerUri, "C:\\Output", AcknowledgementMode.ClientAcknowledge, _mockParameterAccess.Object, _mockLogger.Object);
+        SetupConnectionMocks();
 
-        // Act
-        var consumer = sut.GetConsumer();
+        var topic = new ActiveMQSubscribeTopicTestable(
+            "TestTopic",
+            "tcp://localhost:61616",
+            "C:/temp",
+            AcknowledgementMode.AutoAcknowledge,
+            _mockParam.Object,
+            _mockLogger.Object,
+            _mockConnFactory.Object
+        );
 
-        // Assert
-        Assert.NotNull(consumer);
-    }
+        topic.Dispose();
 
-    [Fact]
-    public void OnReportMessageListener_ShouldThrow_WhenMessageIsNull()
-    {
-        // Arrange
-        var sut = new ActiveMQSubscribeTopic("topic", "uri", "dir", AcknowledgementMode.AutoAcknowledge, _mockParameterAccess.Object, _mockLogger.Object);
-
-        // Act & Assert
-        Assert.Throws<ArgumentNullException>(() =>
-        {
-            var onReportMessageListenerMethod = typeof(ActiveMQSubscribeTopic)
-                .GetMethod("OnReportMessageListener", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            onReportMessageListenerMethod.Invoke(sut, new object[] { null });
-        });
-    }
-
-    [Fact]
-    public void Dispose_ShouldCleanUpResources()
-    {
-        // Arrange
-        var sut = new ActiveMQSubscribeTopic("topic", "uri", "dir", AcknowledgementMode.AutoAcknowledge, _mockParameterAccess.Object, _mockLogger.Object);
-
-        // Mock the internal fields via reflection if necessary
-        var consumerField = typeof(ActiveMQSubscribeTopic).GetField("consumer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        consumerField.SetValue(sut, _mockConsumer.Object);
-
-        var sessionField = typeof(ActiveMQSubscribeTopic).GetField("session", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        sessionField.SetValue(sut, _mockSession.Object);
-
-        var connectionField = typeof(ActiveMQSubscribeTopic).GetField("connection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        connectionField.SetValue(sut, _mockConnection.Object);
-
-        // Act
-        sut.Dispose();
-
-        // Assert
         _mockConsumer.Verify(c => c.Close(), Times.Once);
         _mockSession.Verify(s => s.Close(), Times.Once);
         _mockConnection.Verify(c => c.Close(), Times.Once);
+    }
+
+    // --------------------------
+    // REPORT MESSAGE LISTENER TEST
+    // --------------------------
+    [Fact]
+    public void OnReportMessageListener_ShouldProcessReportMessage()
+    {
+        SetupConnectionMocks();
+
+        // Arrange
+        var topic = new ActiveMQSubscribeTopicTestable(
+            "ReportTopic",
+            "tcp://localhost:61616",
+            "C:/temp",
+            AcknowledgementMode.AutoAcknowledge,
+            _mockParam.Object,
+            _mockLogger.Object,
+            _mockConnFactory.Object
+        );
+
+        var msg = new Mock<ITextMessage>();
+        msg.Setup(m => m.Text).Returns("<xml>OK</xml>");
+        msg.Setup(m => m.NMSCorrelationID).Returns("REF123");
+
+        // Act
+        topic.TriggerReportMessage(msg.Object);
+
+        // Assert
+        _mockLogger.Verify(l => l.Info(It.IsAny<string>()), Times.AtLeastOnce);
+    }
+
+    // --------------------------
+    // ATTACHMENT LISTENER TEST
+    // --------------------------
+    [Fact]
+    public void OnAttachmentMessageListener_ShouldProcessAttachmentMessage()
+    {
+        SetupConnectionMocks();
+
+        var topic = new ActiveMQSubscribeTopicTestable(
+            "AttachmentTopic",
+            "tcp://localhost:61616",
+            "C:/temp",
+            AcknowledgementMode.AutoAcknowledge,
+            _mockParam.Object,
+            _mockLogger.Object,
+            _mockConnFactory.Object
+        );
+
+        var msg = new Mock<ITextMessage>();
+        msg.Setup(m => m.Text).Returns("<xml>OK</xml>");
+        msg.Setup(m => m.NMSCorrelationID).Returns("ATTACH123");
+
+        // Act
+        topic.TriggerAttachmentMessage(msg.Object);
+
+        // Assert
+        _mockLogger.Verify(l => l.Info(It.IsAny<string>()), Times.AtLeastOnce);
+    }
+
+    // --------------------------
+    // ERROR HANDLING TEST
+    // --------------------------
+    [Fact]
+    public void Constructor_ShouldLogCritical_WhenConnectionFails()
+    {
+        // Arrange
+        _mockConnFactory.Setup(f => f.CreateConnection())
+            .Throws(new Exception("Connection failed"));
+
+        // Act + Assert
+        Assert.Throws<Exception>(() =>
+            new ActiveMQSubscribeTopicTestable(
+                "Topic",
+                "tcp://localhost:61616",
+                "C:/temp",
+                AcknowledgementMode.AutoAcknowledge,
+                _mockParam.Object,
+                _mockLogger.Object,
+                _mockConnFactory.Object
+            )
+        );
+
+        _mockLogger.Verify(l => l.Critical(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+
+    // --------------------------
+    // INTERNAL MOCK SETUP
+    // --------------------------
+    private void SetupConnectionMocks()
+    {
+        _mockConnFactory.Setup(f => f.CreateConnection())
+            .Returns(_mockConnection.Object);
+
+        _mockConnection.Setup(c => c.CreateSession(It.IsAny<AcknowledgementMode>()))
+            .Returns(_mockSession.Object);
+
+        _mockSession.Setup(s => s.CreateConsumer(It.IsAny<IDestination>(), null))
+            .Returns(_mockConsumer.Object);
+
+        _mockConnection.Setup(c => c.Start());
+    }
+}
+
+/// <summary>
+/// Testable wrapper so we can call protected listeners
+/// </summary>
+public class ActiveMQSubscribeTopicTestable : ActiveMQSubscribeTopic
+{
+    private readonly IConnectionFactory _factory;
+
+    public ActiveMQSubscribeTopicTestable(
+        string topicName,
+        string brokerUri,
+        string outputDir,
+        AcknowledgementMode ack,
+        IParameterAccess p,
+        ILogger l,
+        IConnectionFactory fakeFactory
+    ) : base(topicName, brokerUri, outputDir, ack, p, l)
+    {
+        _factory = fakeFactory;
+        OverrideConnectionFactory(fakeFactory);
+    }
+
+    public void TriggerReportMessage(IMessage msg)
+    {
+        base.OnReportMessageTest(msg);
+    }
+
+    public void TriggerAttachmentMessage(IMessage msg)
+    {
+        base.OnAttachmentMessageTest(msg);
     }
 }
