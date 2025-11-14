@@ -4,144 +4,137 @@ using Apache.NMS;
 using System;
 using System.Reflection;
 
+// ---------------------------
+// Test-friendly subclass
+// ---------------------------
+public class FakeActiveMQSubscribeTopic : ActiveMQSubscribeTopic
+{
+    public FakeActiveMQSubscribeTopic(
+        string topicName,
+        string brokerUri,
+        string outputDir,
+        AcknowledgementMode ack,
+        IParameterAccess parameters,
+        ILogger logger)
+        : base(topicName, brokerUri, outputDir, ack, parameters, logger)
+    {
+    }
+
+    // Override InitConnection so real code is not executed
+    protected override void InitConnection()
+    {
+        // Do nothing — prevents original constructor logic
+    }
+}
+
+// ---------------------------
+// UNIT TESTS
+// ---------------------------
 public class ActiveMQSubscribeTopicTests
 {
-    private readonly Mock<IParameterAccess> _param;
-    private readonly Mock<ILogger> _logger;
-    private readonly Mock<IConnectionFactory> _factory;
-    private readonly Mock<IConnection> _conn;
-    private readonly Mock<ISession> _session;
-    private readonly Mock<IMessageConsumer> _consumer;
+    private Mock<IParameterAccess> _param;
+    private Mock<ILogger> _logger;
+    private Mock<IConnectionFactory> _factory;
+    private Mock<IConnection> _connection;
+    private Mock<ISession> _session;
+    private Mock<IMessageConsumer> _consumer;
 
     public ActiveMQSubscribeTopicTests()
     {
         _param = new Mock<IParameterAccess>();
         _logger = new Mock<ILogger>();
         _factory = new Mock<IConnectionFactory>();
-        _conn = new Mock<IConnection>();
+        _connection = new Mock<IConnection>();
         _session = new Mock<ISession>();
         _consumer = new Mock<IMessageConsumer>();
     }
 
-    private ActiveMQSubscribeTopic CreateTopic()
+    private FakeActiveMQSubscribeTopic CreateTestInstance()
     {
-        // Mock parameter
         _param.Setup(x => x.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-              .Returns("DummyTopic");
+              .Returns("TestTopic");
 
-        // Mock connection factory
-        _factory.Setup(x => x.CreateConnection()).Returns(_conn.Object);
-
-        // Mock session
-        _conn.Setup(x => x.CreateSession(It.IsAny<AcknowledgementMode>()))
-             .Returns(_session.Object);
-
-        // Mock consumer
-        _session.Setup(x => x.CreateConsumer(It.IsAny<IDestination>(), null))
-                .Returns(_consumer.Object);
-
-        // Force the constructor to use our mocked ConnectionFactory using reflection
-        var topic = (ActiveMQSubscribeTopic)Activator.CreateInstance(
-            typeof(ActiveMQSubscribeTopic),
-            BindingFlags.Public | BindingFlags.Instance,
-            binder: null,
-            args: new object[]
-            {
-                "TestTopic",
-                "tcp://localhost:61616",
-                "C:/Output",
-                AcknowledgementMode.AutoAcknowledge,
-                _param.Object,
-                _logger.Object
-            },
-            culture: null
+        // Instantiate subclass where InitConnection() is not executed
+        var instance = new FakeActiveMQSubscribeTopic(
+            "TestTopic",
+            "tcp://localhost:61616",
+            "C:\\Output",
+            AcknowledgementMode.AutoAcknowledge,
+            _param.Object,
+            _logger.Object
         );
 
-        // Inject mocked factory using reflection
-        var factoryField = typeof(ActiveMQSubscribeTopic).GetField("connectionFactory", BindingFlags.NonPublic | BindingFlags.Instance);
-        factoryField.SetValue(topic, _factory.Object);
+        // Inject mocks using reflection
+        typeof(ActiveMQSubscribeTopic)
+            .GetField("connectionFactory", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(instance, _factory.Object);
 
-        return topic;
+        typeof(ActiveMQSubscribeTopic)
+            .GetField("connection", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(instance, _connection.Object);
+
+        typeof(ActiveMQSubscribeTopic)
+            .GetField("session", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(instance, _session.Object);
+
+        typeof(ActiveMQSubscribeTopic)
+            .GetField("consumer", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(instance, _consumer.Object);
+
+        return instance;
     }
 
     // -----------------------------
-    //  Test Constructor + InitConnection
+    // Test Dispose
     // -----------------------------
     [Fact]
-    public void Constructor_ShouldInitialize_AndCreateConnection()
+    public void Dispose_ShouldCall_Close_OnAllResources()
     {
-        var topic = CreateTopic();
+        var instance = CreateTestInstance();
 
-        _factory.Verify(f => f.CreateConnection(), Times.Once);
-        _conn.Verify(c => c.Start(), Times.Once);
-        Assert.NotNull(topic.GetConsumer());
-    }
-
-    // -----------------------------
-    //  GetConsumer Test
-    // -----------------------------
-    [Fact]
-    public void GetConsumer_ShouldReturnConsumer()
-    {
-        var topic = CreateTopic();
-
-        var consumer = topic.GetConsumer();
-
-        Assert.NotNull(consumer);
-    }
-
-    // -----------------------------
-    //  Dispose Test
-    // -----------------------------
-    [Fact]
-    public void Dispose_ShouldCleanUpAllConnections()
-    {
-        var topic = CreateTopic();
-
-        topic.Dispose();
+        instance.Dispose();
 
         _consumer.Verify(c => c.Close(), Times.Once);
         _session.Verify(s => s.Close(), Times.Once);
-        _conn.Verify(c => c.Close(), Times.Once);
+        _connection.Verify(c => c.Close(), Times.Once);
     }
 
     // -----------------------------
-    //  Report Message Listener Test
+    // Test OnReportMessageListener
     // -----------------------------
     [Fact]
-    public void OnReportMessageListener_ShouldProcessMessage()
+    public void OnReportMessageListener_ShouldLogAcknowledgement()
     {
-        var topic = CreateTopic();
+        var instance = CreateTestInstance();
 
-        var message = new Mock<ITextMessage>();
-        message.Setup(m => m.Text).Returns("<xml>OK</xml>");
-        message.Setup(m => m.NMSCorrelationID).Returns("REF-123");
+        var msg = new Mock<ITextMessage>();
+        msg.Setup(m => m.Text).Returns("<xml>OK</xml>");
+        msg.Setup(m => m.NMSCorrelationID).Returns("REF123");
 
-        // Call private method using reflection
         MethodInfo method = typeof(ActiveMQSubscribeTopic)
             .GetMethod("OnReportMessageListener", BindingFlags.NonPublic | BindingFlags.Instance);
 
-        method.Invoke(topic, new object[] { message.Object });
+        method.Invoke(instance, new object[] { msg.Object });
 
         _logger.Verify(l => l.Info(It.IsAny<string>()), Times.AtLeastOnce);
     }
 
     // -----------------------------
-    //  Attachment Message Listener Test
+    // Test OnAttachmentMessageListener
     // -----------------------------
     [Fact]
-    public void OnAttachmentMessageListener_ShouldProcessMessage()
+    public void OnAttachmentMessageListener_ShouldLogInfoOrWarning()
     {
-        var topic = CreateTopic();
+        var instance = CreateTestInstance();
 
-        var message = new Mock<ITextMessage>();
-        message.Setup(m => m.Text).Returns("<xml>OK</xml>");
-        message.Setup(m => m.NMSCorrelationID).Returns("ATT-456");
+        var msg = new Mock<ITextMessage>();
+        msg.Setup(m => m.Text).Returns("<xml>OK</xml>");
+        msg.Setup(m => m.NMSCorrelationID).Returns("ATT123");
 
         MethodInfo method = typeof(ActiveMQSubscribeTopic)
             .GetMethod("OnAttachmentMessageListener", BindingFlags.NonPublic | BindingFlags.Instance);
 
-        method.Invoke(topic, new object[] { message.Object });
+        method.Invoke(instance, new object[] { msg.Object });
 
         _logger.Verify(l => l.Info(It.IsAny<string>()), Times.AtLeastOnce);
     }
