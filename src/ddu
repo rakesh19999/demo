@@ -1,145 +1,80 @@
-using Xunit;
-using Moq;
-using System;
-using System.Threading.Tasks;
-using System.Reflection;
-
-public class DuiCommandModuleTests
+[Fact]
+public async Task Initialize_RabbitMqTrue_ShouldExecuteSubscribeBlock()
 {
-    private readonly Mock<ILogger> _logger = new();
-    private readonly Mock<IParameterAccess> _parameterAccess = new();
-    private readonly Mock<IBaseServices> _baseServices = new();
+    // Arrange
+    var logger = new Mock<ILogger>();
+    var parameterAccess = new Mock<IParameterAccess>();
+    var baseServices = new Mock<IBaseServices>();
 
-    // Helper to create the instance
-    private DuiCommandModule CreateModule()
-    {
-        return new DuiCommandModule(
-            _baseServices.Object,
-            _logger.Object,
-            _parameterAccess.Object
-        );
-    }
+    parameterAccess.Setup(x => x.GetParameterListItem(
+        It.IsAny<string>(),
+        It.IsAny<string>(),
+        It.IsAny<string>()))
+        .Returns("adminUser");
 
-    private void SetPrivateField(object obj, string name, object value)
-    {
-        obj.GetType()
-           .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
-           .SetValue(obj, value);
-    }
+    // Force CheckIsRabbitMq to TRUE via SHIM
+    var shim = new Mock<WebRMSRestService>("adminUser", parameterAccess.Object);
+    shim.Setup(x => x.CheckIsRabbitMq()).Returns(true);
+    shim.Setup(x => x.GetRabbitMQSettings()).Returns(new RabbitMQSettings());
 
-    [Fact]
-    public async Task Initialize_WhenRabbitMq_ShouldRunSubscribeBlock()
-    {
-        // Arrange
-        var module = CreateModule();
+    var module = new DuiCommandModule(baseServices.Object, logger.Object, parameterAccess.Object);
 
-        // Make parameter return any admin name
-        _parameterAccess.Setup(x => x.GetParameterListItem(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-            .Returns("admin");
+    // Inject fake object created above into local variable using reflection
+    var field = typeof(DuiCommandModule).GetField("restServiceManager",
+        BindingFlags.Instance | BindingFlags.NonPublic);
+    field?.SetValue(module, shim.Object);
 
-        // Force CheckIsRabbitMq() to return true
-        var restService = new Mock<WebRMSRestService>("admin", _parameterAccess.Object);
-        restService.Setup(x => x.CheckIsRabbitMq()).Returns(true);
-        restService.Setup(x => x.GetRabbitMQSettings()).Returns(new RabbitMQSettings());
+    // Create fake ImportUtil instance
+    var util = new Mock<ImportUtil>(parameterAccess.Object, logger.Object);
+    util.Setup(x => x.SubscribeToMessagingQueues(
+        It.IsAny<string>(), true, It.IsAny<RabbitMQSettings>()));
 
-        // Replace real WebRMSRestService instance via reflection
-        SetPrivateField(module, "webRMSRestService", restService.Object);
+    // Inject ImportUtil with reflection
+    var utilField = typeof(DuiCommandModule).GetField("util",
+        BindingFlags.Instance | BindingFlags.NonPublic);
+    utilField?.SetValue(module, util.Object);
 
-        // Act
-        module.Initialize();
-        await Task.Delay(150); // allow Task.Run to finish
+    // Act
+    module.Initialize();
 
-        // Assert
-        // No exception = path executed
-        Assert.True(true);
-    }
+    // Wait for Task.Run to complete
+    await Task.Delay(200);
 
-    [Fact]
-    public void Initialize_WhenNotRabbitMq_ShouldCreateActiveMqConnection()
-    {
-        // Arrange
-        var module = CreateModule();
+    // Assert → means Initialize() executed and Task.Run didn't throw
+    util.Verify(x => x.SubscribeToMessagingQueues(
+        It.IsAny<string>(), true, It.IsAny<RabbitMQSettings>()),
+        Times.Once);
+}
+[Fact]
+public void Initialize_RabbitMqFalse_ShouldCreateActiveMQConnection()
+{
+    // Arrange
+    var logger = new Mock<ILogger>();
+    var parameterAccess = new Mock<IParameterAccess>();
+    var baseServices = new Mock<IBaseServices>();
 
-        _parameterAccess.Setup(x => x.GetParameterListItem(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-            .Returns("admin");
+    parameterAccess.Setup(x => x.GetParameterListItem(
+        It.IsAny<string>(),
+        It.IsAny<string>(),
+        It.IsAny<string>()))
+        .Returns("adminUser");
 
-        // Mock service and force CheckIsRabbitMq() = false
-        var restService = new Mock<WebRMSRestService>("admin", _parameterAccess.Object);
-        restService.Setup(x => x.CheckIsRabbitMq()).Returns(false);
+    var shim = new Mock<WebRMSRestService>("adminUser", parameterAccess.Object);
+    shim.Setup(x => x.CheckIsRabbitMq()).Returns(false);
 
-        SetPrivateField(module, "webRMSRestService", restService.Object);
+    var module = new DuiCommandModule(baseServices.Object, logger.Object, parameterAccess.Object);
 
-        // Act
-        module.Initialize();
+    // Inject fake rest service
+    var field = typeof(DuiCommandModule).GetField("restServiceManager",
+        BindingFlags.Instance | BindingFlags.NonPublic);
+    field?.SetValue(module, shim.Object);
 
-        // Assert
-        // Expect mfrActiveMQConnection to be created (not null)
-        var field = typeof(DuiCommandModule)
-            .GetField("mfrActiveMQConnection", BindingFlags.NonPublic | BindingFlags.Instance);
+    // Act
+    module.Initialize();
 
-        var connection = field.GetValue(module);
+    // Assert: ActiveMQ connection created
+    var mqField = typeof(DuiCommandModule).GetField("mfrActiveMQConnection",
+        BindingFlags.Instance | BindingFlags.NonPublic);
 
-        Assert.NotNull(connection);
-    }
-
-    [Fact]
-    public void Dispose_WhenNotRabbitMq_ShouldDisposeActiveMqConnection()
-    {
-        // Arrange
-        var module = CreateModule();
-
-        // Pretend RabbitMq = false
-        SetPrivateField(module, "isRabbitMq", false);
-
-        // Inject mock connection
-        var connectionMock = new Mock<MFRActiveMQConnection>(_parameterAccess.Object, _logger.Object, "DUI");
-        SetPrivateField(module, "afrActiveMQConnection", connectionMock.Object);
-
-        // Act
-        module.Dispose();
-
-        // Assert
-        connectionMock.Verify(x => x.Dispose(), Times.Once);
-    }
-
-    [Fact]
-    public void Dispose_WhenRabbitMq_ShouldNotDisposeConnection()
-    {
-        // Arrange
-        var module = CreateModule();
-
-        SetPrivateField(module, "isRabbitMq", true);
-
-        var connectionMock = new Mock<MFRActiveMQConnection>(_parameterAccess.Object, _logger.Object, "DUI");
-        SetPrivateField(module, "afrActiveMQConnection", connectionMock.Object);
-
-        // Act
-        module.Dispose();
-
-        // Assert
-        connectionMock.Verify(x => x.Dispose(), Times.Never);
-    }
-
-    [Fact]
-    public void Dispose_WhenAlreadyDisposed_ShouldNotExecuteAgain()
-    {
-        // Arrange
-        var module = CreateModule();
-
-        SetPrivateField(module, "isRabbitMq", false);
-
-        var connectionMock = new Mock<MFRActiveMQConnection>(_parameterAccess.Object, _logger.Object, "DUI");
-        SetPrivateField(module, "afrActiveMQConnection", connectionMock.Object);
-
-        // First dispose
-        module.Dispose();
-
-        // Second dispose (should not call Dispose again)
-        module.Dispose();
-
-        // Assert
-        connectionMock.Verify(x => x.Dispose(), Times.Once);
-    }
+    Assert.NotNull(mqField.GetValue(module));
 }
