@@ -1,0 +1,155 @@
+using System;
+using System.Threading.Tasks;
+using Moq;
+using Xunit;
+using Microsoft.Extensions.Logging;
+
+public class DuiCommandModuleTests
+{
+    private readonly Mock<ILogger> _loggerMock = new();
+    private readonly Mock<IParameterAccess> _parameterMock = new();
+    private readonly Mock<IKebsRestService> _restServiceMock = new();
+    private readonly Mock<INFRActiveMQConnection> _activeMqMock = new();
+
+    private DuiCommandModule CreateModule()
+    {
+        var baseServiceMock = new Mock<BaseServices>(_loggerMock.Object);
+        return new DuiCommandModule(baseServiceMock.Object, _loggerMock.Object, _parameterMock.Object);
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST 1 : Initialize → RABBITMQ PATH
+    // ---------------------------------------------------------------------
+    [Fact]
+    public void Initialize_ShouldUseRabbitMQ_WhenIsRabbitTrue()
+    {
+        // Arrange
+        var module = CreateModule();
+
+        _parameterMock.Setup(p =>
+            p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns("adminUser");
+
+        var restServiceManagerMock = new Mock<IKebsRestServiceManager>();
+        restServiceManagerMock.Setup(m => m.CheckIsRabbit()).Returns(true);
+
+        restServiceManagerMock
+            .Setup(m => m.GetRabbitMQSettings())
+            .Returns(new RabbitMQSettings());
+
+        // Inject mocked rest service into module
+        module.RestServiceManagerFactory = () => restServiceManagerMock.Object;
+
+        // Capture that SubscribeToMessagingQueues is called
+        module.SubscribeToMessagingQueuesHandler = (name, isRabbit, settings) =>
+        {
+            Assert.True(isRabbit);
+            Assert.NotNull(settings);
+        };
+
+        // Act
+        module.Initialize();
+
+        // Assert
+        restServiceManagerMock.Verify(m => m.CheckIsRabbit(), Times.Once);
+        restServiceManagerMock.Verify(m => m.GetRabbitMQSettings(), Times.Once);
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST 2 : Initialize → ACTIVEMQ PATH
+    // ---------------------------------------------------------------------
+    [Fact]
+    public void Initialize_ShouldUseActiveMQ_WhenIsRabbitFalse()
+    {
+        // Arrange
+        var module = CreateModule();
+
+        _parameterMock.Setup(p =>
+            p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Returns("adminUser");
+
+        var restServiceManagerMock = new Mock<IKebsRestServiceManager>();
+        restServiceManagerMock.Setup(m => m.CheckIsRabbit()).Returns(false);
+
+        module.RestServiceManagerFactory = () => restServiceManagerMock.Object;
+        module.ActiveMQConnectionFactory = () => _activeMqMock.Object;
+
+        // Act
+        module.Initialize();
+
+        // Assert
+        _activeMqMock.Verify(a => a.Start(), Times.Once);
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST 3 : Dispose() – Should Dispose ActiveMQ IF NOT Rabbit
+    // ---------------------------------------------------------------------
+    [Fact]
+    public void Dispose_ShouldDisposeActiveMQ_WhenNotRabbit()
+    {
+        // Arrange
+        var module = CreateModule();
+        module.ActiveMQConnectionFactory = () => _activeMqMock.Object;
+
+        // Force ActiveMQ path
+        module.IsRabbitMq = false;
+
+        // Act
+        module.Dispose();
+
+        // Assert
+        _activeMqMock.Verify(a => a.Dispose(), Times.Once);
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST 4 : Dispose() – Should NOT Dispose ActiveMQ WHEN Rabbit
+    // ---------------------------------------------------------------------
+    [Fact]
+    public void Dispose_ShouldNotDisposeActiveMQ_WhenRabbit()
+    {
+        // Arrange
+        var module = CreateModule();
+        module.ActiveMQConnectionFactory = () => _activeMqMock.Object;
+
+        module.IsRabbitMq = true;
+
+        // Act
+        module.Dispose();
+
+        // Assert
+        _activeMqMock.Verify(a => a.Dispose(), Times.Never);
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST 5 : Dispose() – Should not run twice (disposedValue check)
+    // ---------------------------------------------------------------------
+    [Fact]
+    public void Dispose_ShouldNotRunTwice()
+    {
+        // Arrange
+        var module = CreateModule();
+        module.ActiveMQConnectionFactory = () => _activeMqMock.Object;
+        module.IsRabbitMq = false;
+
+        // Act
+        module.Dispose();
+        module.Dispose();  // second time should do nothing
+
+        // Assert
+        _activeMqMock.Verify(a => a.Dispose(), Times.Once);
+    }
+}
+public Func<IKebsRestServiceManager> RestServiceManagerFactory { get; set; }
+public Func<INFRActiveMQConnection> ActiveMQConnectionFactory { get; set; }
+public Action<string, bool, RabbitMQSettings> SubscribeToMessagingQueuesHandler { get; set; }
+
+public bool IsRabbitMq
+{
+    get => isRabbitMq;
+    set => isRabbitMq = value;
+}
+
+public override void SubscribeToMessagingQueues(string module, bool isRabbit, RabbitMQSettings settings)
+{
+    SubscribeToMessagingQueuesHandler?.Invoke(module, isRabbit, settings);
+}
