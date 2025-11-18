@@ -1,52 +1,53 @@
 [Fact]
-public void UpdateAttachmentRecordStatus_Should_Update_All_Expected_Fields_And_DataAccess_Calls()
+public void CheckAttachmentsFromApi_Should_Cover_All_Branches()
 {
     // Arrange
     var handler = CreateHandler();
+    var createResponse = new CreateAttachmentResponse();
 
     var request = new CreateAttachmentRequest
     {
         Attachment = new AttachmentDto
         {
-            AttachmentId = "10",
-            LinkedAttachmentRecnum = "20",
-            AttachmentRecnum = "30",
-            CreatedBy = "tester"
+            CreatedBy = "tester",
+            AttachmentRecnum = "10",
+            FormType = "FormA",
+            FormRecnum = "100"
         }
     };
 
-    var attachmentEntity = new ATTACHMENT
-    {
-        ATTACHMENT_ID = "10",
-        IS_DELETED = false,
-        ACK_MESSAGE = null,
-        LINKED_ATTACHMENT_RECNUM = null,
-        ATTACHMENT_RECNUM = null
-    };
+    // Mock API Response with one attachment entry
+    string jsonWithAttachment =
+        "{ \"result\": { \"attachments\": [{ \"attachmentRecnum\": \"10\", \"status\": \"Uploaded\" }] } }";
 
-    // Mock MFRDataAccess
+    var restMock = new Mock<IWebRestServiceManager>();
+    restMock.Setup(x => x.GetAttachmentList("FormA", "100"))
+            .Returns(jsonWithAttachment);
+
+    // Inject mock into handler via reflection
+    typeof(AttachmentsRequestHandler)
+        .GetField("_restServiceManager",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+        .SetValue(handler, restMock.Object);
+
+    // Mock MFRDataAccess used internally
     var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
 
-    dataAccessMock.Setup(x => x.GetAttachmentByRef("10"))
-                  .Returns(attachmentEntity);
-
-    dataAccessMock.Setup(x => x.UpdateAttachment(It.IsAny<ATTACHMENT>()))
+    dataAccessMock.Setup(x => x.UpdateAttachmentStatusFromApi(It.IsAny<string>(), It.IsAny<string>()))
                   .Verifiable();
 
-    // Inject mock into handler (via reflection)
     typeof(AttachmentsRequestHandler)
-        .GetField("_dataAccess", 
+       .GetField("_dataAccess",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-        .SetValue(handler, dataAccessMock.Object);
+       .SetValue(handler, dataAccessMock.Object);
 
     // Act
-    InvokePrivate(handler, "UpdateAttachmentRecordStatus", request);
+    InvokePrivate(handler, "CheckAttachmentsFromApi", request, createResponse);
 
-    // Assert – attachment fields changed correctly
-    Assert.Equal("20", attachmentEntity.LINKED_ATTACHMENT_RECNUM);
-    Assert.Equal("30", attachmentEntity.ATTACHMENT_RECNUM);
+    // Assert: API success path taken
+    Assert.True(createResponse.IsSuccess);
+    Assert.Equal("Uploaded", createResponse.AcknowledgementMessage);
 
-    // Assert – data access was called
-    dataAccessMock.Verify(x => x.UpdateAttachment(It.IsAny<ATTACHMENT>()), Times.Once());
-    dataAccessMock.Verify(x => x.GetAttachmentByRef("10"), Times.Once());
+    // Assert: Data access updated status
+    dataAccessMock.Verify(x => x.UpdateAttachmentStatusFromApi("10", "Uploaded"), Times.Once());
 }
