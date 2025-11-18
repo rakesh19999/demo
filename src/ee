@@ -1,141 +1,52 @@
-// ADD THESE TESTS BELOW YOUR EXISTING TESTS
-
-// ---------------------------------------------------------------
-//  PARSE EXPORT MESSAGE (private static parseExportMessage)
-// ---------------------------------------------------------------
 [Fact]
-public void ParseExportMessage_ValidXml_ReturnsObject()
+public void UpdateAttachmentRecordStatus_Should_Update_All_Expected_Fields_And_DataAccess_Calls()
 {
-    var xml =
-        "<Export>" +
-            "<ReferenceId>ABC123</ReferenceId>" +
-            "<Code>OK</Code>" +
-            "<Message>Success</Message>" +
-        "</Export>";
+    // Arrange
+    var handler = CreateHandler();
 
-    var method = typeof(ImportMessageQueueClient)
-        .GetMethod("parseExportMessage", BindingFlags.NonPublic | BindingFlags.Static);
+    var request = new CreateAttachmentRequest
+    {
+        Attachment = new AttachmentDto
+        {
+            AttachmentId = "10",
+            LinkedAttachmentRecnum = "20",
+            AttachmentRecnum = "30",
+            CreatedBy = "tester"
+        }
+    };
 
-    Assert.NotNull(method);
+    var attachmentEntity = new ATTACHMENT
+    {
+        ATTACHMENT_ID = "10",
+        IS_DELETED = false,
+        ACK_MESSAGE = null,
+        LINKED_ATTACHMENT_RECNUM = null,
+        ATTACHMENT_RECNUM = null
+    };
 
-    var result = method.Invoke(null, new object[] { xml, null });
+    // Mock MFRDataAccess
+    var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
 
-    Assert.NotNull(result);
+    dataAccessMock.Setup(x => x.GetAttachmentByRef("10"))
+                  .Returns(attachmentEntity);
 
-    // Use reflection to check returned object's properties
-    var refProp = result.GetType().GetProperty("ReferenceId");
-    Assert.Equal("ABC123", refProp.GetValue(result));
-}
+    dataAccessMock.Setup(x => x.UpdateAttachment(It.IsAny<ATTACHMENT>()))
+                  .Verifiable();
 
-// ---------------------------------------------------------------
-//  BASE64 DECODE TO BYTE (private static base64DecodeToByte)
-// ---------------------------------------------------------------
-[Fact]
-public void Base64DecodeToByte_ReturnsBytes()
-{
-    var text = "hello world";
-    var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+    // Inject mock into handler (via reflection)
+    typeof(AttachmentsRequestHandler)
+        .GetField("_dataAccess", 
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+        .SetValue(handler, dataAccessMock.Object);
 
-    var method = typeof(ImportMessageQueueClient)
-        .GetMethod("base64DecodeToByte", BindingFlags.NonPublic | BindingFlags.Static);
+    // Act
+    InvokePrivate(handler, "UpdateAttachmentRecordStatus", request);
 
-    var bytes = (byte[])method.Invoke(null, new object[] { encoded });
+    // Assert – attachment fields changed correctly
+    Assert.Equal("20", attachmentEntity.LINKED_ATTACHMENT_RECNUM);
+    Assert.Equal("30", attachmentEntity.ATTACHMENT_RECNUM);
 
-    Assert.Equal(text, Encoding.UTF8.GetString(bytes));
-}
-
-// ---------------------------------------------------------------
-//  SEND MESSAGE FOR DELETE (private sendMessageForDelete)
-// ---------------------------------------------------------------
-[Fact]
-public void SendMessageForDelete_CreatesProperXml()
-{
-    var client = new ImportMessageQueueClient("http://dummy");
-
-    var method = client.GetType().GetMethod("sendMessageForDelete",
-        BindingFlags.NonPublic | BindingFlags.Instance);
-
-    var xml = (string)method.Invoke(client, new object[] { "ABC123", "CASE", "SUB1" });
-
-    Assert.Contains("<DeleteMessage", xml);
-    Assert.Contains("ABC123", xml);
-    Assert.Contains("CASE", xml);
-    Assert.Contains("SUB1", xml);
-}
-
-// ---------------------------------------------------------------
-//  DELETE ATTACHMENT MESSAGE (private deleteAttachmentMessage)
-// ---------------------------------------------------------------
-[Fact]
-public void DeleteAttachmentMessage_ReturnsValidXml()
-{
-    var client = new ImportMessageQueueClient("http://dummy");
-
-    var method = client.GetType().GetMethod("deleteAttachmentMessage",
-        BindingFlags.NonPublic | BindingFlags.Instance);
-
-    var xml = (string)method.Invoke(client, new object[] { "REF1001", "OK", "DONE" });
-
-    Assert.Contains("AttachmentDelete", xml);
-    Assert.Contains("REF1001", xml);
-    Assert.Contains("OK", xml);
-    Assert.Contains("DONE", xml);
-}
-
-// ---------------------------------------------------------------
-//  SEND MESSAGE FOR DELETE LINKED RECORDS
-// ---------------------------------------------------------------
-[Fact]
-public void SendMessageForDeleteLinked_ReturnsValidXml()
-{
-    var client = new ImportMessageQueueClient("http://dummy");
-
-    var method = client.GetType().GetMethod("sendMessageForDeleteLinked",
-        BindingFlags.NonPublic | BindingFlags.Instance);
-
-    var xml = (string)method.Invoke(client, new object[] { "REC001", "FORMTYPE1" });
-
-    Assert.Contains("REC001", xml);
-    Assert.Contains("FORMTYPE1", xml);
-}
-
-// ---------------------------------------------------------------
-//  LOG MESSAGE TIME  (private _logMessageTime)
-// ---------------------------------------------------------------
-[Fact]
-public void LogMessageTime_DoesNotThrow()
-{
-    var client = new ImportMessageQueueClient("http://dummy");
-
-    var method = client.GetType().GetMethod("_logMessageTime",
-        BindingFlags.NonPublic | BindingFlags.Instance);
-
-    var xml = "<root></root>";
-
-    var ex = Record.Exception(() =>
-        method.Invoke(client, new object[] { xml, DateTime.UtcNow })
-    );
-
-    Assert.Null(ex); // if it doesn't throw, it's success
-}
-
-// ---------------------------------------------------------------
-//  IMPORT MESSAGE TO QUEUE (private importMessageToQueue)
-// ---------------------------------------------------------------
-[Fact]
-public void ImportMessageToQueue_ReturnsMessageId()
-{
-    var client = new ImportMessageQueueClient("http://dummy");
-
-    var method = client.GetType().GetMethod("importMessageToQueue",
-        BindingFlags.NonPublic | BindingFlags.Instance);
-
-    // Build minimal XML payload
-    string xml = "<root><test>1</test></root>";
-
-    // Since real queue isn't used, method returns simple string
-    var result = method.Invoke(client, new object[] { xml });
-
-    Assert.NotNull(result);
-    Assert.IsType<string>(result);
+    // Assert – data access was called
+    dataAccessMock.Verify(x => x.UpdateAttachment(It.IsAny<ATTACHMENT>()), Times.Once());
+    dataAccessMock.Verify(x => x.GetAttachmentByRef("10"), Times.Once());
 }
