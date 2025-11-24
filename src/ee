@@ -1,53 +1,152 @@
-[Fact]
-public void CheckAttachmentsFromApi_Should_Cover_All_Branches()
+using System;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+using Xunit;
+
+public enum DatabaseTypes
 {
-    // Arrange
-    var handler = CreateHandler();
-    var createResponse = new CreateAttachmentResponse();
+    Oracle,
+    SqlServer
+}
 
-    var request = new CreateAttachmentRequest
+// ---------- Production Code (copied exactly as provided) ----------
+public class CommandQuery
+{
+    public string CommandString { get; private set; }
+    public Dictionary<string, string> Params { get; private set; }
+
+    public CommandQuery(DatabaseTypes dbType, string commandString, params string[] paramValues)
     {
-        Attachment = new AttachmentDto
+        List<string> parameters = new List<string>();
+        string pattern = null;
+
+        switch (dbType)
         {
-            CreatedBy = "tester",
-            AttachmentRecnum = "10",
-            FormType = "FormA",
-            FormRecnum = "100"
+            case DatabaseTypes.Oracle:
+                pattern = @"(?<1>\w):\w+";
+                break;
+
+            case DatabaseTypes.SqlServer:
+                pattern = @"@\w+";
+                break;
         }
-    };
 
-    // Mock API Response with one attachment entry
-    string jsonWithAttachment =
-        "{ \"result\": { \"attachments\": [{ \"attachmentRecnum\": \"10\", \"status\": \"Uploaded\" }] } }";
+        var regexOptions = RegexOptions.None;
+        var timeout = TimeSpan.FromSeconds(2);
+        var matches = Regex.Matches(commandString, pattern, regexOptions, timeout);
 
-    var restMock = new Mock<IWebRestServiceManager>();
-    restMock.Setup(x => x.GetAttachmentList("FormA", "100"))
-            .Returns(jsonWithAttachment);
+        if (matches != null && matches.Count > 0)
+        {
+            foreach (Match match in matches)
+                parameters.Add(match.Value);
+        }
 
-    // Inject mock into handler via reflection
-    typeof(AttachmentsRequestHandler)
-        .GetField("_restServiceManager",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-        .SetValue(handler, restMock.Object);
+        Initialize(dbType, commandString, parameters, new List<string>(paramValues));
+    }
 
-    // Mock MFRDataAccess used internally
-    var dataAccessMock = new Mock<MFRDataAccess>(_parameterAccessMock.Object, _loggerMock.Object);
+    public CommandQuery(DatabaseTypes dbType, string commandString, List<string> parameters, List<string> parameterValues)
+    {
+        Initialize(dbType, commandString, parameters, parameterValues);
+    }
 
-    dataAccessMock.Setup(x => x.UpdateAttachmentStatusFromApi(It.IsAny<string>(), It.IsAny<string>()))
-                  .Verifiable();
+    public CommandQuery(DatabaseTypes dbType, string commandString, Dictionary<string, string> paramsAndValues)
+    {
+        Params = paramsAndValues;
+        Initialize(dbType, commandString);
+    }
 
-    typeof(AttachmentsRequestHandler)
-       .GetField("_dataAccess",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-       .SetValue(handler, dataAccessMock.Object);
+    private void Initialize(DatabaseTypes dbType, string commandString, List<string> parameters, List<string> parameterValues)
+    {
+        if (parameters.Count != parameterValues.Count)
+            throw new Exception($"Unable to sync Parameters to ParameterValues for query '{commandString}'");
 
-    // Act
-    InvokePrivate(handler, "CheckAttachmentsFromApi", request, createResponse);
+        Params = new Dictionary<string, string>();
+        for (int i = 0; i < parameters.Count; i++)
+            Params[parameters[i]] = parameterValues[i];
 
-    // Assert: API success path taken
-    Assert.True(createResponse.IsSuccess);
-    Assert.Equal("Uploaded", createResponse.AcknowledgementMessage);
+        Initialize(dbType, commandString);
+    }
 
-    // Assert: Data access updated status
-    dataAccessMock.Verify(x => x.UpdateAttachmentStatusFromApi("10", "Uploaded"), Times.Once());
+    private void Initialize(DatabaseTypes dbType, string commandString)
+    {
+        switch (dbType)
+        {
+            case DatabaseTypes.Oracle:
+                CommandString = commandString.Replace('@', ':');
+                break;
+
+            case DatabaseTypes.SqlServer:
+                CommandString = commandString.Replace(':', '@');
+                break;
+        }
+    }
+}
+// --------------------------------------------------------------
+
+
+// ------------------------ UNIT TESTS ---------------------------
+
+public class CommandQueryTests
+{
+    [Fact]
+    public void Constructor_ParamArray_Oracle_ExtractsParameters_And_ReplacesTokens()
+    {
+        // Arrange
+        string query = "SELECT * FROM Users WHERE Id = @Id AND Name = @Name";
+
+        // Act
+        var cq = new CommandQuery(DatabaseTypes.Oracle, query, "10", "John");
+
+        // Assert
+        Assert.Equal(":Id", cq.CommandString.Contains(":Id") ? ":Id" : null);
+        Assert.Equal(":Name", cq.CommandString.Contains(":Name") ? ":Name" : null);
+
+        Assert.Equal("10", cq.Params["@Id"]);
+        Assert.Equal("John", cq.Params["@Name"]);
+    }
+
+    [Fact]
+    public void Constructor_ParamArray_SqlServer_ExtractsParams_And_FixesTokens()
+    {
+        string query = "SELECT * FROM Users WHERE Id = :Id";
+
+        var cq = new CommandQuery(DatabaseTypes.SqlServer, query, "55");
+
+        Assert.Equal("@Id", cq.CommandString.Contains("@Id") ? "@Id" : null);
+        Assert.Equal("55", cq.Params[":Id"]);
+    }
+
+    [Fact]
+    public void Constructor_ListConstructor_AssignsParamsCorrectly()
+    {
+        var parameters = new List<string> { "@A", "@B" };
+        var values = new List<string> { "1", "2" };
+
+        var cq = new CommandQuery(DatabaseTypes.SqlServer, "test :A :B", parameters, values);
+
+        Assert.Equal("1", cq.Params["@A"]);
+        Assert.Equal("2", cq.Params["@B"]);
+    }
+
+    [Fact]
+    public void Constructor_DictionaryConstructor_Oracle_ReplacesTokens()
+    {
+        var dict = new Dictionary<string, string>
+        {
+            { "@X", "100" }
+        };
+
+        var cq = new CommandQuery(DatabaseTypes.Oracle, "SELECT * FROM T WHERE X = @X", dict);
+
+        Assert.Equal(":X", cq.CommandString.Contains(":X") ? ":X" : null);
+    }
+
+    [Fact]
+    public void Initialize_ThrowsException_When_ParameterCountMismatch()
+    {
+        var parameters = new List<string> { "@Id" };
+        var values = new List<string> { "100", "ExtraValue" };
+
+        Assert.Throws<Exception>(() => new CommandQuery(DatabaseTypes.SqlServer, "SELECT", parameters, values));
+    }
 }
