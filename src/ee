@@ -1,152 +1,162 @@
-using System;
-using System.Collections.Generic;
-using System.Text.RegularExpressions;
 using Xunit;
+using Moq;
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+using Intergraph.Framework.Contracts;
+using Intergraph.Framework.Logging;
+using Intergraph.Framework.Localization;
+using Intergraph.MFR.ApprovalsModule;
 
-public enum DatabaseTypes
+public class AttachmentsRequestHandler_HandleMessage_Tests
 {
-    Oracle,
-    SqlServer
-}
+    private readonly Mock<ILogger> _logger = new();
+    private readonly Mock<ILocalizedStrings> _localizedStrings = new();
+    private readonly Mock<IParameterAccess> _parameterAccess = new();
+    private readonly Mock<ISession> _session = new();
 
-// ---------- Production Code (copied exactly as provided) ----------
-public class CommandQuery
-{
-    public string CommandString { get; private set; }
-    public Dictionary<string, string> Params { get; private set; }
+    private AttachmentsRequestHandler Create() =>
+        new AttachmentsRequestHandler(_logger.Object, _localizedStrings.Object,
+                                      _session.Object, _parameterAccess.Object);
 
-    public CommandQuery(DatabaseTypes dbType, string commandString, params string[] paramValues)
+    // Helper to force private method execution
+    private object CallPrivate(object obj, string name, params object[] args)
     {
-        List<string> parameters = new List<string>();
-        string pattern = null;
+        var m = obj.GetType().GetMethod(name,
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic);
 
-        switch (dbType)
-        {
-            case DatabaseTypes.Oracle:
-                pattern = @"(?<1>\w):\w+";
-                break;
-
-            case DatabaseTypes.SqlServer:
-                pattern = @"@\w+";
-                break;
-        }
-
-        var regexOptions = RegexOptions.None;
-        var timeout = TimeSpan.FromSeconds(2);
-        var matches = Regex.Matches(commandString, pattern, regexOptions, timeout);
-
-        if (matches != null && matches.Count > 0)
-        {
-            foreach (Match match in matches)
-                parameters.Add(match.Value);
-        }
-
-        Initialize(dbType, commandString, parameters, new List<string>(paramValues));
+        return m.Invoke(obj, args);
     }
 
-    public CommandQuery(DatabaseTypes dbType, string commandString, List<string> parameters, List<string> parameterValues)
-    {
-        Initialize(dbType, commandString, parameters, parameterValues);
-    }
-
-    public CommandQuery(DatabaseTypes dbType, string commandString, Dictionary<string, string> paramsAndValues)
-    {
-        Params = paramsAndValues;
-        Initialize(dbType, commandString);
-    }
-
-    private void Initialize(DatabaseTypes dbType, string commandString, List<string> parameters, List<string> parameterValues)
-    {
-        if (parameters.Count != parameterValues.Count)
-            throw new Exception($"Unable to sync Parameters to ParameterValues for query '{commandString}'");
-
-        Params = new Dictionary<string, string>();
-        for (int i = 0; i < parameters.Count; i++)
-            Params[parameters[i]] = parameterValues[i];
-
-        Initialize(dbType, commandString);
-    }
-
-    private void Initialize(DatabaseTypes dbType, string commandString)
-    {
-        switch (dbType)
-        {
-            case DatabaseTypes.Oracle:
-                CommandString = commandString.Replace('@', ':');
-                break;
-
-            case DatabaseTypes.SqlServer:
-                CommandString = commandString.Replace(':', '@');
-                break;
-        }
-    }
-}
-// --------------------------------------------------------------
-
-
-// ------------------------ UNIT TESTS ---------------------------
-
-public class CommandQueryTests
-{
+    // ---------------------------- TEST #1 ----------------------------
     [Fact]
-    public void Constructor_ParamArray_Oracle_ExtractsParameters_And_ReplacesTokens()
+    public void HandleMessage_AddAttachment_FullPath_Covers_All_Lines()
     {
         // Arrange
-        string query = "SELECT * FROM Users WHERE Id = @Id AND Name = @Name";
+        var handler = Create();
 
-        // Act
-        var cq = new CommandQuery(DatabaseTypes.Oracle, query, "10", "John");
+        // Create temp folder + dummy file so foreach(file) runs
+        string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(tempDir);
 
-        // Assert
-        Assert.Equal(":Id", cq.CommandString.Contains(":Id") ? ":Id" : null);
-        Assert.Equal(":Name", cq.CommandString.Contains(":Name") ? ":Name" : null);
+        string filePath = Path.Combine(tempDir, "dummy.dat");
+        File.WriteAllText(filePath, "HELLO ABC");
 
-        Assert.Equal("10", cq.Params["@Id"]);
-        Assert.Equal("John", cq.Params["@Name"]);
-    }
+        // Mock repository path
+        _parameterAccess
+            .Setup(x => x.GetParameterListItem("MFR", "Repository", "MfrCombinedChunksRepositoryLocation"))
+            .Returns(tempDir);
 
-    [Fact]
-    public void Constructor_ParamArray_SqlServer_ExtractsParams_And_FixesTokens()
-    {
-        string query = "SELECT * FROM Users WHERE Id = :Id";
+        // Mock session → return agent code
+        _session.Setup(x => x.GetValue("PrimaryAgency"))
+                .Returns("AG001");
 
-        var cq = new CommandQuery(DatabaseTypes.SqlServer, query, "55");
-
-        Assert.Equal("@Id", cq.CommandString.Contains("@Id") ? "@Id" : null);
-        Assert.Equal("55", cq.Params[":Id"]);
-    }
-
-    [Fact]
-    public void Constructor_ListConstructor_AssignsParamsCorrectly()
-    {
-        var parameters = new List<string> { "@A", "@B" };
-        var values = new List<string> { "1", "2" };
-
-        var cq = new CommandQuery(DatabaseTypes.SqlServer, "test :A :B", parameters, values);
-
-        Assert.Equal("1", cq.Params["@A"]);
-        Assert.Equal("2", cq.Params["@B"]);
-    }
-
-    [Fact]
-    public void Constructor_DictionaryConstructor_Oracle_ReplacesTokens()
-    {
-        var dict = new Dictionary<string, string>
+        var req = new CreateAttachmentRequest
         {
-            { "@X", "100" }
+            Attachment = new AttachmentDto
+            {
+                AttachmentId = Guid.NewGuid().ToString(),
+                RequestType = AttachmentActions.AddAttachment,
+                Recnum = null // MUST BE NULL → triggers AddAttachment branch
+            }
         };
 
-        var cq = new CommandQuery(DatabaseTypes.Oracle, "SELECT * FROM T WHERE X = @X", dict);
+        var header = new MessageHeader { SessionId = "S1" };
 
-        Assert.Equal(":X", cq.CommandString.Contains(":X") ? ":X" : null);
+        // Act
+        var result = handler.HandleMessage(header, req);
+
+        // Assert
+        Assert.True(result.Response.Success);
+
+        // Cleanup
+        Directory.Delete(tempDir, true);
     }
 
+    // ---------------------------- TEST #2 ----------------------------
     [Fact]
-    public void Initialize_ThrowsException_When_ParameterCountMismatch()
+    public void HandleMessage_DeleteAttachment_Covers_Branch()
     {
-        var parameters = new List<string> { "@Id" };
-        var values = new List<string> { "100", "ExtraValue" };
+        var handler = Create();
 
-        Assert.Throws<Exception>(() => new CommandQuery(DatabaseTypes.SqlServer, "SELECT", parameters, values));
+        var req = new CreateAttachmentRequest
+        {
+            Attachment = new AttachmentDto
+            {
+                AttachmentId = "A1",
+                RequestType = AttachmentActions.DeleteAttachment
+            }
+        };
+
+        var header = new MessageHeader();
+
+        var result = handler.HandleMessage(header, req);
+
+        Assert.True(result.Response.Success);
+    }
+
+    // ---------------------------- TEST #3 ----------------------------
+    [Fact]
+    public void HandleMessage_AttachmentDeleteStatus_Covers_Branch()
+    {
+        var handler = Create();
+
+        var req = new CreateAttachmentRequest
+        {
+            Attachment = new AttachmentDto
+            {
+                AttachmentId = "A1",
+                RequestType = AttachmentActions.AttachmentDeleteStatus
+            }
+        };
+
+        var header = new MessageHeader();
+
+        var result = handler.HandleMessage(header, req);
+
+        Assert.True(result.Response.Success);
+    }
+
+    // ---------------------------- TEST #4 ----------------------------
+    [Fact]
+    public void HandleMessage_UnknownType_Covers_Warning_Branch()
+    {
+        var handler = Create();
+
+        var req = new CreateAttachmentRequest
+        {
+            Attachment = new AttachmentDto
+            {
+                AttachmentId = "A1",
+                RequestType = "XYZ_UNKNOWN"
+            }
+        };
+
+        var header = new MessageHeader();
+
+        var result = handler.HandleMessage(header, req);
+
+        Assert.True(result.Response.Success);
+    }
+
+    // ---------------------------- TEST #5 ----------------------------
+    [Fact]
+    public void HandleMessage_Exception_Covers_Catch_Block()
+    {
+        var handler = Create();
+
+        var req = new CreateAttachmentRequest
+        {
+            Attachment = null // FORCE NullRef inside try block
+        };
+
+        var header = new MessageHeader();
+
+        var result = handler.HandleMessage(header, req);
+
+        Assert.False(result.Response.Success);
+        Assert.NotEmpty(result.Response.Messages);
     }
 }
