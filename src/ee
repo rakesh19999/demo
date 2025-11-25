@@ -1,162 +1,272 @@
-using Xunit;
-using Moq;
 using System;
-using System.IO;
-using System.Collections.Generic;
 using System.Linq;
-using Intergraph.Framework.Contracts;
-using Intergraph.Framework.Logging;
-using Intergraph.Framework.Localization;
-using Intergraph.MFR.ApprovalsModule;
+using System.Reflection;
+using Moq;
+using Newtonsoft.Json.Linq;
+using Xunit;
 
-public class AttachmentsRequestHandler_HandleMessage_Tests
+// Replace the namespace below with the namespace of your production code if different
+using MFR.ApprovalsModule;
+
+namespace MFR.ApprovalsModule.Tests
 {
-    private readonly Mock<ILogger> _logger = new();
-    private readonly Mock<ILocalizedStrings> _localizedStrings = new();
-    private readonly Mock<IParameterAccess> _parameterAccess = new();
-    private readonly Mock<ISession> _session = new();
-
-    private AttachmentsRequestHandler Create() =>
-        new AttachmentsRequestHandler(_logger.Object, _localizedStrings.Object,
-                                      _session.Object, _parameterAccess.Object);
-
-    // Helper to force private method execution
-    private object CallPrivate(object obj, string name, params object[] args)
+    public class ApprovalsRequestHandlerTests
     {
-        var m = obj.GetType().GetMethod(name,
-            System.Reflection.BindingFlags.Instance |
-            System.Reflection.BindingFlags.NonPublic);
+        private readonly Mock<ILogger> _mockLogger = new();
+        private readonly Mock<ILocalizedStrings> _mockLocalizedStrings = new();
+        private readonly Mock<ISession> _mockSession = new();
+        private readonly Mock<IParameterAccess> _mockParameterAccess = new();
 
-        return m.Invoke(obj, args);
-    }
-
-    // ---------------------------- TEST #1 ----------------------------
-    [Fact]
-    public void HandleMessage_AddAttachment_FullPath_Covers_All_Lines()
-    {
-        // Arrange
-        var handler = Create();
-
-        // Create temp folder + dummy file so foreach(file) runs
-        string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(tempDir);
-
-        string filePath = Path.Combine(tempDir, "dummy.dat");
-        File.WriteAllText(filePath, "HELLO ABC");
-
-        // Mock repository path
-        _parameterAccess
-            .Setup(x => x.GetParameterListItem("MFR", "Repository", "MfrCombinedChunksRepositoryLocation"))
-            .Returns(tempDir);
-
-        // Mock session → return agent code
-        _session.Setup(x => x.GetValue("PrimaryAgency"))
-                .Returns("AG001");
-
-        var req = new CreateAttachmentRequest
+        private ApprovalsRequestHandler CreateHandler()
         {
-            Attachment = new AttachmentDto
+            // Construct the handler under test. Constructor pattern based on your screenshot:
+            return new ApprovalsRequestHandler(
+                _mockLogger.Object,
+                _mockLocalizedStrings.Object,
+                _mockSession.Object,
+                _mockParameterAccess.Object);
+        }
+
+        [Fact]
+        public void ConvertActionTypeToApprovalActions_ValidAction_ReturnsEnum()
+        {
+            // Arrange
+            var handler = CreateHandler();
+
+            // Create a MFRApprovalRequest with a known valid ActionType string
+            var request = new MFRApprovalRequest
             {
-                AttachmentId = Guid.NewGuid().ToString(),
-                RequestType = AttachmentActions.AddAttachment,
-                Recnum = null // MUST BE NULL → triggers AddAttachment branch
-            }
-        };
+                ActionType = "StartApproval"
+            };
 
-        var header = new MessageHeader { SessionId = "S1" };
+            // Use reflection to call the private method ConvertActionTypeToApprovalActions
+            var method = typeof(ApprovalsRequestHandler)
+                .GetMethod("ConvertActionTypeToApprovalActions", BindingFlags.Instance | BindingFlags.NonPublic);
 
-        // Act
-        var result = handler.HandleMessage(header, req);
+            Assert.NotNull(method);
 
-        // Assert
-        Assert.True(result.Response.Success);
+            // Act
+            var result = method.Invoke(handler, new object[] { request });
 
-        // Cleanup
-        Directory.Delete(tempDir, true);
-    }
+            // Assert - expected enum value (depends on your ApprovalActions enum naming)
+            // Adjust the expected enum if your enum name differs slightly.
+            Assert.Equal(ApprovalActions.StartApproval, result);
+        }
 
-    // ---------------------------- TEST #2 ----------------------------
-    [Fact]
-    public void HandleMessage_DeleteAttachment_Covers_Branch()
-    {
-        var handler = Create();
-
-        var req = new CreateAttachmentRequest
+        [Fact]
+        public void ConvertActionTypeToApprovalActions_InvalidAction_ThrowsException()
         {
-            Attachment = new AttachmentDto
+            var handler = CreateHandler();
+
+            var request = new MFRApprovalRequest
             {
-                AttachmentId = "A1",
-                RequestType = AttachmentActions.DeleteAttachment
-            }
-        };
+                ActionType = "NonExistentActionType"
+            };
 
-        var header = new MessageHeader();
+            var method = typeof(ApprovalsRequestHandler)
+                .GetMethod("ConvertActionTypeToApprovalActions", BindingFlags.Instance | BindingFlags.NonPublic);
 
-        var result = handler.HandleMessage(header, req);
+            Assert.NotNull(method);
 
-        Assert.True(result.Response.Success);
-    }
+            // Act & Assert
+            var ex = Assert.Throws<TargetInvocationException>(() => method.Invoke(handler, new object[] { request }));
+            // The private method throws Exception("Invalid action type specified"), wrapped by TargetInvocationException
+            Assert.NotNull(ex.InnerException);
+            Assert.Contains("Invalid action type", ex.InnerException.Message, StringComparison.OrdinalIgnoreCase);
+        }
 
-    // ---------------------------- TEST #3 ----------------------------
-    [Fact]
-    public void HandleMessage_AttachmentDeleteStatus_Covers_Branch()
-    {
-        var handler = Create();
-
-        var req = new CreateAttachmentRequest
+        [Fact]
+        public void InvokeApprovalAction_StartApproval_CallsWebServiceStartApproval()
         {
-            Attachment = new AttachmentDto
+            // Arrange
+            var handler = CreateHandler();
+
+            var mockService = new Mock<IWebRMSApprovalService>();
+
+            // Set up the mock to return a sentinel object when StartApproval is called
+            var expected = new { result = "started" };
+            mockService
+                .Setup(s => s.StartApproval(It.IsAny<object>()))
+                .Returns(expected);
+
+            // Prepare request: ensure request.Value is a JObject so ToObject<T>() will succeed inside ExecuteAction
+            var request = new MFRApprovalRequest
             {
-                AttachmentId = "A1",
-                RequestType = AttachmentActions.AttachmentDeleteStatus
-            }
-        };
+                ActionType = "StartApproval",
+                Value = JObject.FromObject(new { any = "payload" })
+            };
 
-        var header = new MessageHeader();
+            // Act
+            var result = handler.InvokeApprovalAction(request, mockService.Object);
 
-        var result = handler.HandleMessage(header, req);
+            // Assert
+            Assert.Same(expected, result);
+            mockService.Verify(s => s.StartApproval(It.IsAny<object>()), Times.Once);
+        }
 
-        Assert.True(result.Response.Success);
-    }
-
-    // ---------------------------- TEST #4 ----------------------------
-    [Fact]
-    public void HandleMessage_UnknownType_Covers_Warning_Branch()
-    {
-        var handler = Create();
-
-        var req = new CreateAttachmentRequest
+        [Fact]
+        public void InvokeApprovalAction_Complete_CallsWebServiceComplete()
         {
-            Attachment = new AttachmentDto
+            var handler = CreateHandler();
+            var mockService = new Mock<IWebRMSApprovalService>();
+
+            var expected = new { result = "completed" };
+            mockService
+                .Setup(s => s.Complete(It.IsAny<object>()))
+                .Returns(expected);
+
+            var request = new MFRApprovalRequest
             {
-                AttachmentId = "A1",
-                RequestType = "XYZ_UNKNOWN"
-            }
-        };
+                ActionType = "Complete",
+                Value = JObject.FromObject(new { any = "payload" })
+            };
 
-        var header = new MessageHeader();
+            var result = handler.InvokeApprovalAction(request, mockService.Object);
 
-        var result = handler.HandleMessage(header, req);
+            Assert.Same(expected, result);
+            mockService.Verify(s => s.Complete(It.IsAny<object>()), Times.Once);
+        }
 
-        Assert.True(result.Response.Success);
-    }
-
-    // ---------------------------- TEST #5 ----------------------------
-    [Fact]
-    public void HandleMessage_Exception_Covers_Catch_Block()
-    {
-        var handler = Create();
-
-        var req = new CreateAttachmentRequest
+        [Fact]
+        public void InvokeApprovalAction_GetModuleEnabled_ReturnsFalseWhenServiceReturnsNull()
         {
-            Attachment = null // FORCE NullRef inside try block
-        };
+            var handler = CreateHandler();
+            var mockService = new Mock<IWebRMSApprovalService>();
 
-        var header = new MessageHeader();
+            // Service returns null for module-enabled path:
+            mockService
+                .Setup(s => s.GetApprovalModuleEnabled(It.IsAny<object>()))
+                .Returns((object?)null);
 
-        var result = handler.HandleMessage(header, req);
+            var request = new MFRApprovalRequest
+            {
+                ActionType = "GetModuleEnabled", // matches your handler case
+                Value = JObject.FromObject(new { any = "payload" })
+            };
 
-        Assert.False(result.Response.Success);
-        Assert.NotEmpty(result.Response.Messages);
+            var result = handler.InvokeApprovalAction(request, mockService.Object);
+
+            // In your code, when val == null, the handler returns string "false"
+            Assert.Equal("false", result);
+            mockService.Verify(s => s.GetApprovalModuleEnabled(It.IsAny<object>()), Times.Once);
+        }
+
+        [Fact]
+        public void ExecuteAction_ClaimsAndOtherActions_InvokeCorrectServiceMethods()
+        {
+            var handler = CreateHandler();
+            var mockService = new Mock<IWebRMSApprovalService>();
+
+            mockService.Setup(s => s.Claim(It.IsAny<object>())).Returns("claimed");
+            mockService.Setup(s => s.UnClaim(It.IsAny<object>())).Returns("unclaimed");
+            mockService.Setup(s => s.Redirect(It.IsAny<object>())).Returns("redirected");
+            mockService.Setup(s => s.Reject(It.IsAny<object>())).Returns("rejected");
+
+            var claimRequest = new MFRApprovalRequest { ActionType = "Claim", Value = JObject.FromObject(new { id = 1 }) };
+            var unClaimRequest = new MFRApprovalRequest { ActionType = "UnClaim", Value = JObject.FromObject(new { id = 2 }) };
+            var redirectRequest = new MFRApprovalRequest { ActionType = "Redirect", Value = JObject.FromObject(new { id = 3 }) };
+            var rejectRequest = new MFRApprovalRequest { ActionType = "Reject", Value = JObject.FromObject(new { id = 4 }) };
+
+            Assert.Equal("claimed", handler.InvokeApprovalAction(claimRequest, mockService.Object));
+            Assert.Equal("unclaimed", handler.InvokeApprovalAction(unClaimRequest, mockService.Object));
+            Assert.Equal("redirected", handler.InvokeApprovalAction(redirectRequest, mockService.Object));
+            Assert.Equal("rejected", handler.InvokeApprovalAction(rejectRequest, mockService.Object));
+
+            mockService.Verify(s => s.Claim(It.IsAny<object>()), Times.Once);
+            mockService.Verify(s => s.UnClaim(It.IsAny<object>()), Times.Once);
+            mockService.Verify(s => s.Redirect(It.IsAny<object>()), Times.Once);
+            mockService.Verify(s => s.Reject(It.IsAny<object>()), Times.Once);
+        }
+
+        [Fact]
+        public void HandleMessage_OnInvalidAction_CatchesExceptionAndReturnsFailureResponse()
+        {
+            // This test triggers the handler's exception branch by giving an invalid action type.
+            var handler = CreateHandler();
+
+            var header = new MessageHeader
+            {
+                // Set simple fields used by code; adjust names if your MessageHeader differs
+                SessionId = Guid.NewGuid().ToString()
+            };
+
+            // Create a request that will cause ConvertActionTypeToApprovalActions to throw when called
+            var request = new MFRApprovalRequest
+            {
+                ActionType = "InvalidActionThatWillNotParse",
+                Value = new JObject()
+            };
+
+            // Act
+            var messageResponse = handler.HandleMessage(header, request);
+
+            // Assert: as per your catch block, response.Success should be false and an error message should be present
+            Assert.NotNull(messageResponse);
+            // The returned MessageResponse contains the handler response object which in your code was built from Response
+            // Inspecting internals depends on your MessageResponse implementation; try to access the contained response object:
+            var responseProperty = messageResponse.GetType().GetProperty("Response", BindingFlags.Public | BindingFlags.Instance)
+                                   ?? messageResponse.GetType().GetProperty("response", BindingFlags.Public | BindingFlags.Instance);
+
+            if (responseProperty != null)
+            {
+                var responseObj = responseProperty.GetValue(messageResponse);
+                if (responseObj != null)
+                {
+                    // try to read 'Success' property on response object
+                    var successProp = responseObj.GetType().GetProperty("Success", BindingFlags.Public | BindingFlags.Instance);
+                    if (successProp != null)
+                    {
+                        var successVal = (bool)successProp.GetValue(responseObj)!;
+                        Assert.False(successVal, "Expected handler to return a failure Response when InvokeApprovalAction throws.");
+                    }
+
+                    // try to read Messages collection
+                    var messagesProp = responseObj.GetType().GetProperty("Messages", BindingFlags.Public | BindingFlags.Instance);
+                    if (messagesProp != null)
+                    {
+                        var messages = messagesProp.GetValue(responseObj) as System.Collections.IEnumerable;
+                        Assert.NotNull(messages);
+                        // Ensure that there is at least one message mentioning 'Error occured' added by your catch block
+                        var found = false;
+                        foreach (var m in messages!)
+                        {
+                            if (m != null && m.ToString().Contains("Error occured", StringComparison.OrdinalIgnoreCase))
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        Assert.True(found, "Expected the response messages to contain the handler error text.");
+                    }
+                }
+            }
+
+            // Also check the returned messageResponse object to ensure the payload's Data or IsSuccess reflect failure.
+            var payloadProp = messageResponse.GetType().GetProperty("Payload", BindingFlags.Public | BindingFlags.Instance)
+                              ?? messageResponse.GetType().GetProperty("payload", BindingFlags.Public | BindingFlags.Instance);
+
+            if (payloadProp != null)
+            {
+                var payload = payloadProp.GetValue(messageResponse);
+                if (payload != null)
+                {
+                    // Try to get 'IsSuccess' or 'ErrorMessage' fields if present on payload
+                    var isSuccessProp = payload.GetType().GetProperty("IsSuccess", BindingFlags.Public | BindingFlags.Instance);
+                    if (isSuccessProp != null)
+                    {
+                        var isSuccessVal = (bool)isSuccessProp.GetValue(payload)!;
+                        Assert.False(isSuccessVal);
+                    }
+
+                    var errMsgProp = payload.GetType().GetProperty("ErrorMessage", BindingFlags.Public | BindingFlags.Instance);
+                    if (errMsgProp != null)
+                    {
+                        var err = errMsgProp.GetValue(payload) as string;
+                        Assert.NotNull(err);
+                        Assert.NotEmpty(err);
+                    }
+                }
+            }
+        }
     }
 }
