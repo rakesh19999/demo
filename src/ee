@@ -1,46 +1,76 @@
-[Fact]
-public void InsertAttachmentCopyStatus_Covers_All_Paths()
-{
-    // Arrange
-    var parameterMock = new Mock<IParameterAccess>();
-    var loggerMock = new Mock<ILogger>();
+import React from "react";
+import { render, screen, fireEvent } from "@testing-library/react";
+import HxgnMFRMenuComponent from "./HxgnMFRMenuComponent";
 
-    // Fake parameter return value used in GetFullPathName
-    parameterMock.Setup(p => p.GetParameterListItem("MFR", "Repository", "MfrAttachmentRepositoryLocation"))
-                 .Returns("C:\\TempRepo");
+describe("Discard confirmation flow", () => {
 
-    // Fake attachment request
-    var request = new CreateAttachmentRequest
-    {
-        Attachment = new ATTACHMENT
-        {
-            AttachmentId = "ATT123"
-        }
+  function setup(extraProps = {}) {
+    const mockOnClose = jest.fn();
+
+    const props = {
+      onClose: mockOnClose,
+      isDisableDiscardButton: false,
+      disabled: false,
+      validationDataList: [],
+      isConnected: false,
+      shouldDisplayRecordLock: false,
+      pageCount: 1,
+      warningCount: 0,
+      validationCount: 0,
+      setoffset: jest.fn(),
+      offset: 0,
+      editDeleteButtonLabel: "Edit",
+      recnumOfCurrentRecord: "123",
+      onEditReleaseButtonClick: jest.fn(),
+      onLockRecordClick: jest.fn(),
+      onSecurityButtonClick: jest.fn(),
+      onshareclick: jest.fn(),
+      handlePrintClick: jest.fn(),
+      handlePageClick: jest.fn(),
+      warningData: [],
+      errorData: [],
+      dispatch: jest.fn(),
+      ...extraProps
     };
 
-    // Create handler using reflection-safe constructor
-    var handler = new AttachmentsRequestHandler(loggerMock.Object, null!, null!, parameterMock.Object);
+    render(<HxgnMFRMenuComponent {...props} />);
+    return { mockOnClose };
+  }
 
-    // ====== REFLECTION TO ACCESS PRIVATE METHOD ======
-    var method = typeof(AttachmentsRequestHandler)
-                    .GetMethod("InsertAttachmentCopyStatus",
-                        BindingFlags.Instance | BindingFlags.NonPublic);
+  test("opens confirm dialog when discard option is clicked", () => {
+    setup();
 
-    Assert.NotNull(method);
+    // Click the Discard option in dropdown
+    const discardOption = screen.getByTestId("mfr-discard"); // adjust if needed
+    fireEvent.click(discardOption);
 
-    // ========= CALL ALL STATUS CASES ============
-    method.Invoke(handler, new object[] { request, FormStatus.Pending });
-    method.Invoke(handler, new object[] { request, FormStatus.Success });
-    method.Invoke(handler, new object[] { request, FormStatus.Failed });
-    method.Invoke(handler, new object[] { request, "OTHER" }); // enters default branch
+    // Confirm dialog should be visible
+    expect(screen.getByText("DISCARD_TEXT")).toBeInTheDocument();
+  });
 
-    // ========= FORCE CATCH BLOCK ============
-    // parameterAccess returns NULL -> GetFullPathName will throw 
-    parameterMock.Setup(p => p.GetParameterListItem(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
-                 .Returns((string)null);
+  test("clicking CANCEL closes dialog and does not call onClose", () => {
+    const { mockOnClose } = setup();
 
-    method.Invoke(handler, new object[] { request, FormStatus.Pending });
+    // open popup
+    fireEvent.click(screen.getByTestId("mfr-discard"));
 
-    // Assert: just ensure no exception escaped
-    Assert.True(true);
-}
+    // click CANCEL in the dialog
+    const cancelBtn = screen.getByTestId("mfr-discard-cancel");
+    fireEvent.click(cancelBtn);
+
+    expect(mockOnClose).not.toHaveBeenCalled();
+  });
+
+  test("clicking DISCARD in dialog calls onClose(true)", () => {
+    const { mockOnClose } = setup();
+
+    // open popup
+    fireEvent.click(screen.getByTestId("mfr-discard"));
+
+    // click confirm discard
+    const confirmBtn = screen.getByTestId("mfr-discard-confirm");
+    fireEvent.click(confirmBtn);
+
+    expect(mockOnClose).toHaveBeenCalledWith(true);
+  });
+});
