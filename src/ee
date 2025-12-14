@@ -1,76 +1,110 @@
-import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
-import HxgnMFRMenuComponent from "./HxgnMFRMenuComponent";
+import React, { FC, useEffect, useRef } from "react";
+import {
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  Button
+} from "@material-ui/core";
+import { setFocus } from "../../CommonUI/UIElementFocusServiceWrapper";
+import { getLocalizedKey } from "../../lib/Dexiebbutil";
 
-describe("Discard confirmation flow", () => {
+declare const GLOBAL_BASE_URL: string;
 
-  function setup(extraProps = {}) {
-    const mockOnClose = jest.fn();
+interface UnsavedChangesDialogProps {
+  open: boolean;
+  headerText?: string;
+  contentText?: string;
+  yesText?: string;
+  noText?: string;
+  onYes: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onNo: (e: React.MouseEvent<HTMLButtonElement>) => void;
+}
 
-    const props = {
-      onClose: mockOnClose,
-      isDisableDiscardButton: false,
-      disabled: false,
-      validationDataList: [],
-      isConnected: false,
-      shouldDisplayRecordLock: false,
-      pageCount: 1,
-      warningCount: 0,
-      validationCount: 0,
-      setoffset: jest.fn(),
-      offset: 0,
-      editDeleteButtonLabel: "Edit",
-      recnumOfCurrentRecord: "123",
-      onEditReleaseButtonClick: jest.fn(),
-      onLockRecordClick: jest.fn(),
-      onSecurityButtonClick: jest.fn(),
-      onshareclick: jest.fn(),
-      handlePrintClick: jest.fn(),
-      handlePageClick: jest.fn(),
-      warningData: [],
-      errorData: [],
-      dispatch: jest.fn(),
-      ...extraProps
-    };
+export const UnsavedChangesDialog: FC<UnsavedChangesDialogProps> = ({
+  open,
+  headerText,
+  contentText,
+  yesText,
+  noText,
+  onYes,
+  onNo
+}) => {
+  const yesBtnRef = useRef<HTMLButtonElement | null>(null);
 
-    render(<HxgnMFRMenuComponent {...props} />);
-    return { mockOnClose };
+  useEffect(() => {
+    if (open && yesBtnRef.current) {
+      setFocus(yesBtnRef.current);
+    }
+  }, [open]);
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onNo}
+      aria-labelledby="unsaved-dialog-title"
+      aria-describedby="unsaved-dialog-description"
+      fullWidth
+      maxWidth="sm"
+      container={document.body}
+    >
+      <DialogTitle id="unsaved-dialog-title">
+        <img
+          src={`${GLOBAL_BASE_URL}AddonViews/MFRHome/Assets/images/warning-icon.png`}
+          alt="warning"
+        />
+        {headerText ?? "Unsaved Changes"}
+      </DialogTitle>
+
+      <DialogContent>
+        <DialogContentText
+          id="unsaved-dialog-description"
+          style={{ color: "black" }}
+        >
+          {contentText ?? getLocalizedKey("DISCARD_TEXT")}
+        </DialogContentText>
+      </DialogContent>
+
+      <DialogActions>
+        <Button color="primary" onClick={onNo}>
+          {noText ?? getLocalizedKey("CANCEL")}
+        </Button>
+
+        <Button
+          color="primary"
+          onClick={onYes}
+          ref={yesBtnRef}
+          className="hxgn-mfr_popup-yes-button"
+        >
+          {yesText ?? getLocalizedKey("DISCARD")}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+
+const [showCloseDialog, setShowCloseDialog] = useState(false);
+
+const handleCloseClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+  if (hasPopUp) {
+    setShowCloseDialog(true);
+  } else {
+    primaryButtonClick?.(e);
   }
+};
 
-  test("opens confirm dialog when discard option is clicked", () => {
-    setup();
 
-    // Click the Discard option in dropdown
-    const discardOption = screen.getByTestId("mfr-discard"); // adjust if needed
-    fireEvent.click(discardOption);
-
-    // Confirm dialog should be visible
-    expect(screen.getByText("DISCARD_TEXT")).toBeInTheDocument();
-  });
-
-  test("clicking CANCEL closes dialog and does not call onClose", () => {
-    const { mockOnClose } = setup();
-
-    // open popup
-    fireEvent.click(screen.getByTestId("mfr-discard"));
-
-    // click CANCEL in the dialog
-    const cancelBtn = screen.getByTestId("mfr-discard-cancel");
-    fireEvent.click(cancelBtn);
-
-    expect(mockOnClose).not.toHaveBeenCalled();
-  });
-
-  test("clicking DISCARD in dialog calls onClose(true)", () => {
-    const { mockOnClose } = setup();
-
-    // open popup
-    fireEvent.click(screen.getByTestId("mfr-discard"));
-
-    // click confirm discard
-    const confirmBtn = screen.getByTestId("mfr-discard-confirm");
-    fireEvent.click(confirmBtn);
-
-    expect(mockOnClose).toHaveBeenCalledWith(true);
-  });
-});
+<UnsavedChangesDialog
+  open={showCloseDialog}
+  headerText={popupHeaderDisplay}
+  contentText={popupContentDisplay}
+  yesText={popupYesDisplay}
+  noText={popupNoDisplay}
+  onNo={() => setShowCloseDialog(false)}
+  onYes={(e) => {
+    setShowCloseDialog(false);
+    primaryDialogSaveClick?.(e);
+  }}
+/>
