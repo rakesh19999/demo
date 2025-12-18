@@ -1,110 +1,90 @@
-import React, { FC, useEffect, useRef } from "react";
-import {
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogContentText,
-  DialogTitle,
-  Button
-} from "@material-ui/core";
-import { setFocus } from "../../CommonUI/UIElementFocusServiceWrapper";
-import { getLocalizedKey } from "../../lib/Dexiebbutil";
+using System.Collections.Generic;
+using Xunit;
+using Moq;
 
-declare const GLOBAL_BASE_URL: string;
+public class MappingFacadeTests
+{
+    private readonly MappingFacade _sut;
 
-interface UnsavedChangesDialogProps {
-  open: boolean;
-  headerText?: string;
-  contentText?: string;
-  yesText?: string;
-  noText?: string;
-  onYes: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onNo: (e: React.MouseEvent<HTMLButtonElement>) => void;
-}
-
-export const UnsavedChangesDialog: FC<UnsavedChangesDialogProps> = ({
-  open,
-  headerText,
-  contentText,
-  yesText,
-  noText,
-  onYes,
-  onNo
-}) => {
-  const yesBtnRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    if (open && yesBtnRef.current) {
-      setFocus(yesBtnRef.current);
+    public MappingFacadeTests()
+    {
+        var loggerMock = new Mock<ILogger>();
+        _sut = new MappingFacade(loggerMock.Object);
     }
-  }, [open]);
 
-  return (
-    <Dialog
-      open={open}
-      onClose={onNo}
-      aria-labelledby="unsaved-dialog-title"
-      aria-describedby="unsaved-dialog-description"
-      fullWidth
-      maxWidth="sm"
-      container={document.body}
-    >
-      <DialogTitle id="unsaved-dialog-title">
-        <img
-          src={`${GLOBAL_BASE_URL}AddonViews/MFRHome/Assets/images/warning-icon.png`}
-          alt="warning"
-        />
-        {headerText ?? "Unsaved Changes"}
-      </DialogTitle>
+    [Fact]
+    public void DMUTOMFRPostProcessing_WhenHeightIsSingleDigit_ShouldFormatCorrectly()
+    {
+        // Arrange
+        var request = new AddIncidentRequest
+        {
+            Names = new List<IncidentName>
+            {
+                new IncidentName { Height = "5\"" }
+            }
+        };
 
-      <DialogContent>
-        <DialogContentText
-          id="unsaved-dialog-description"
-          style={{ color: "black" }}
-        >
-          {contentText ?? getLocalizedKey("DISCARD_TEXT")}
-        </DialogContentText>
-      </DialogContent>
+        // Act
+        _sut.DMUTOMFRPostProcessing(request);
 
-      <DialogActions>
-        <Button color="primary" onClick={onNo}>
-          {noText ?? getLocalizedKey("CANCEL")}
-        </Button>
+        // Assert
+        Assert.Equal("5'00\"", request.Names[0].Height);
+    }
 
-        <Button
-          color="primary"
-          onClick={onYes}
-          ref={yesBtnRef}
-          className="hxgn-mfr_popup-yes-button"
-        >
-          {yesText ?? getLocalizedKey("DISCARD")}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
+    [Fact]
+    public void DMUTOMFRPostProcessing_WhenHeightHasFeetAndInches_ShouldFormatCorrectly()
+    {
+        // Arrange
+        var request = new AddIncidentRequest
+        {
+            Names = new List<IncidentName>
+            {
+                new IncidentName { Height = "5'9\"" }
+            }
+        };
 
+        // Act
+        _sut.DMUTOMFRPostProcessing(request);
 
-const [showCloseDialog, setShowCloseDialog] = useState(false);
+        // Assert
+        Assert.Equal("5'09\"", request.Names[0].Height);
+    }
 
-const handleCloseClick = (e: React.MouseEvent<HTMLButtonElement>) => {
-  if (hasPopUp) {
-    setShowCloseDialog(true);
-  } else {
-    primaryButtonClick?.(e);
-  }
-};
+    [Fact]
+    public void DMUTOMFRPostProcessing_WhenInchesGreaterThan12_ShouldCapAt11()
+    {
+        // Arrange
+        var request = new AddIncidentRequest
+        {
+            Names = new List<IncidentName>
+            {
+                new IncidentName { Height = "5'15\"" }
+            }
+        };
 
+        // Act
+        _sut.DMUTOMFRPostProcessing(request);
 
-<UnsavedChangesDialog
-  open={showCloseDialog}
-  headerText={popupHeaderDisplay}
-  contentText={popupContentDisplay}
-  yesText={popupYesDisplay}
-  noText={popupNoDisplay}
-  onNo={() => setShowCloseDialog(false)}
-  onYes={(e) => {
-    setShowCloseDialog(false);
-    primaryDialogSaveClick?.(e);
-  }}
-/>
+        // Assert
+        Assert.Equal("5'11\"", request.Names[0].Height);
+    }
+
+    [Fact]
+    public void DMUTOMFRPostProcessing_WhenHeightIsNull_ShouldNotThrow()
+    {
+        // Arrange
+        var request = new AddIncidentRequest
+        {
+            Names = new List<IncidentName>
+            {
+                new IncidentName { Height = null }
+            }
+        };
+
+        // Act & Assert
+        var exception = Record.Exception(() =>
+            _sut.DMUTOMFRPostProcessing(request));
+
+        Assert.Null(exception);
+    }
+}
