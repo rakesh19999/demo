@@ -1,196 +1,175 @@
 using Xunit;
 using Moq;
-using System;
-using System.Data;
-using Newtonsoft.Json;
-using OnCall.MFRSessionNotificationsModule;
+using System.Linq;
+using System.ServiceModel;
+using System.ServiceModel.Channels;
+using System.ServiceModel.Description;
+using System.ServiceModel.Dispatcher;
 using Intergraph.Cad.Infrastructure;
-using OnCall.SharedWeb.Database;
+using OnCall.MFRSessionNotificationsModule;
 
 namespace OnCall.MFRSessionNotificationsModule.Tests
 {
-    public class AddonLoginUtilTests
+    public class InspectorBehaviorTests
     {
         private readonly Mock<ILogger> _loggerMock;
-        private readonly Mock<IDatabaseConnectionFactory> _dbFactoryMock;
-        private readonly Mock<IParameterRepository> _parameterRepoMock;
 
-        private readonly AddonLoginUtil _sut;
-
-        public AddonLoginUtilTests()
+        public InspectorBehaviorTests()
         {
             _loggerMock = new Mock<ILogger>();
-            _dbFactoryMock = new Mock<IDatabaseConnectionFactory>();
-            _parameterRepoMock = new Mock<IParameterRepository>();
+        }
 
-            _sut = new AddonLoginUtil(
+        #region InspectorBehavior tests
+
+        [Fact]
+        public void AddBindingParameters_LogsInformation()
+        {
+            // Arrange
+            var behavior = new InspectorBehavior(
                 _loggerMock.Object,
-                _dbFactoryMock.Object,
-                _parameterRepoMock.Object
-            );
-        }
+                "appId",
+                "appToken");
 
-        #region getEmployeeCustomQuery
+            var endpoint = new ServiceEndpoint(
+                ContractDescription.GetContract(typeof(IDisposable)));
 
-        [Fact]
-        public void getEmployeeCustomQuery_ReplacesEmployeeRecnum()
-        {
-            // Arrange
-            string employeeRecnum = "12345";
-            frLoginAddinConstants.employeeQuery =
-                "select * from employee where recnum = ()";
+            var bindingParameters = new BindingParameterCollection();
 
             // Act
-            var result = _sut.getEmployeeCustomQuery(employeeRecnum);
+            behavior.AddBindingParameters(endpoint, bindingParameters);
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Contains(employeeRecnum, result);
-            Assert.DoesNotContain("()", result);
-        }
-
-        #endregion
-
-        #region getEmployeeImageFromResponse
-
-        [Fact]
-        public void getEmployeeImageFromResponse_ReturnsImageThumbnail()
-        {
-            // Arrange
-            string jsonResponse = @"
-            {
-                ""results"": [
-                    {
-                        ""RecordAndImage Thumbnail"": {
-                            ""Image Thumbnail"": ""base64-image-data""
-                        }
-                    }
-                ]
-            }";
-
-            // Act
-            var result = _sut.getEmployeeImageFromResponse(jsonResponse);
-
-            // Assert
-            Assert.Equal("base64-image-data", result);
-        }
-
-        [Fact]
-        public void getEmployeeImageFromResponse_WhenResultsEmpty_ReturnsEmptyString()
-        {
-            // Arrange
-            string jsonResponse = @"{ ""results"": [] }";
-
-            // Act
-            var result = _sut.getEmployeeImageFromResponse(jsonResponse);
-
-            // Assert
-            Assert.Equal(string.Empty, result);
-        }
-
-        #endregion
-
-        #region GetUserName
-
-        [Fact]
-        public void GetUserName_WhenEmployeeExists_ReturnsUserName()
-        {
-            // Arrange
-            var connectionMock = new Mock<IDbConnection>();
-            var commandMock = new Mock<IDbCommand>();
-            var readerMock = new Mock<IDataReader>();
-            var parameterMock = new Mock<IDbDataParameter>();
-
-            _dbFactoryMock
-                .Setup(x => x.CreateRawConnection())
-                .Returns(connectionMock.Object);
-
-            connectionMock
-                .Setup(x => x.CreateCommand())
-                .Returns(commandMock.Object);
-
-            commandMock
-                .Setup(x => x.CreateParameter())
-                .Returns(parameterMock.Object);
-
-            commandMock
-                .Setup(x => x.ExecuteReader())
-                .Returns(readerMock.Object);
-
-            readerMock
-                .SetupSequence(r => r.Read())
-                .Returns(true)
-                .Returns(false);
-
-            readerMock
-                .Setup(r => r.IsDBNull(0))
-                .Returns(false);
-
-            readerMock
-                .Setup(r => r.GetString(0))
-                .Returns("JohnDoe");
-
-            // Act
-            var result = _sut.GetUserName(1001);
-
-            // Assert
-            Assert.Equal("JohnDoe", result);
-        }
-
-        [Fact]
-        public void GetUserName_WhenEmployeeNotFound_ReturnsEmptyString()
-        {
-            // Arrange
-            var connectionMock = new Mock<IDbConnection>();
-            var commandMock = new Mock<IDbCommand>();
-            var readerMock = new Mock<IDataReader>();
-            var parameterMock = new Mock<IDbDataParameter>();
-
-            _dbFactoryMock
-                .Setup(x => x.CreateRawConnection())
-                .Returns(connectionMock.Object);
-
-            connectionMock
-                .Setup(x => x.CreateCommand())
-                .Returns(commandMock.Object);
-
-            commandMock
-                .Setup(x => x.CreateParameter())
-                .Returns(parameterMock.Object);
-
-            commandMock
-                .Setup(x => x.ExecuteReader())
-                .Returns(readerMock.Object);
-
-            readerMock
-                .Setup(r => r.Read())
-                .Returns(false);
-
-            // Act
-            var result = _sut.GetUserName(2002);
-
-            // Assert
-            Assert.Null(result);
-        }
-
-        [Fact]
-        public void GetUserName_WhenExceptionThrown_ReturnsNullAndLogsError()
-        {
-            // Arrange
-            _dbFactoryMock
-                .Setup(x => x.CreateRawConnection())
-                .Throws(new Exception("Database failure"));
-
-            // Act
-            var result = _sut.GetUserName(3003);
-
-            // Assert
-            Assert.Null(result);
-
             _loggerMock.Verify(
-                x => x.Critical(
-                    It.Is<string>(s => s.Contains("GetUserName")),
-                    It.IsAny<Exception>()),
+                x => x.Info(It.Is<string>(s => s.Contains("AddBindingParameters"))),
+                Times.Once);
+        }
+
+        [Fact]
+        public void ApplyClientBehavior_AddsMessageInspector()
+        {
+            // Arrange
+            var behavior = new InspectorBehavior(
+                _loggerMock.Object,
+                "appId",
+                "appToken");
+
+            var endpoint = new ServiceEndpoint(
+                ContractDescription.GetContract(typeof(IDisposable)));
+
+            var clientRuntime = new ClientRuntime("test", "contract");
+
+            // Act
+            behavior.ApplyClientBehavior(endpoint, clientRuntime);
+
+            // Assert
+            Assert.Single(clientRuntime.ClientMessageInspectors);
+            Assert.IsType<MessageInspector>(
+                clientRuntime.ClientMessageInspectors.First());
+        }
+
+        [Fact]
+        public void ApplyDispatchBehavior_LogsInformation()
+        {
+            // Arrange
+            var behavior = new InspectorBehavior(
+                _loggerMock.Object,
+                "appId",
+                "appToken");
+
+            var endpoint = new ServiceEndpoint(
+                ContractDescription.GetContract(typeof(IDisposable)));
+
+            var endpointDispatcher = new EndpointDispatcher(
+                new EndpointAddress("http://localhost/test"),
+                "contract",
+                "namespace");
+
+            // Act
+            behavior.ApplyDispatchBehavior(endpoint, endpointDispatcher);
+
+            // Assert
+            _loggerMock.Verify(
+                x => x.Info(It.Is<string>(s => s.Contains("ApplyDispatchBehavior"))),
+                Times.Once);
+        }
+
+        [Fact]
+        public void Validate_LogsInformation()
+        {
+            // Arrange
+            var behavior = new InspectorBehavior(
+                _loggerMock.Object,
+                "appId",
+                "appToken");
+
+            var endpoint = new ServiceEndpoint(
+                ContractDescription.GetContract(typeof(IDisposable)));
+
+            // Act
+            behavior.Validate(endpoint);
+
+            // Assert
+            _loggerMock.Verify(
+                x => x.Info(It.Is<string>(s => s.Contains("Validate"))),
+                Times.Once);
+        }
+
+        #endregion
+
+        #region MessageInspector tests
+
+        [Fact]
+        public void BeforeSendRequest_AddsHttpHeaders()
+        {
+            // Arrange
+            var inspector = new MessageInspector(
+                _loggerMock.Object,
+                "appId123",
+                "token456");
+
+            var request = Message.CreateMessage(
+                MessageVersion.Soap11,
+                "urn:test");
+
+            var channelMock = new Mock<IClientChannel>();
+
+            // Act
+            inspector.BeforeSendRequest(ref request, channelMock.Object);
+
+            // Assert
+            Assert.True(
+                request.Properties.ContainsKey(HttpRequestMessageProperty.Name));
+
+            var httpProperty =
+                request.Properties[HttpRequestMessageProperty.Name]
+                as HttpRequestMessageProperty;
+
+            Assert.NotNull(httpProperty);
+            Assert.Equal("appId123", httpProperty.Headers["AppID"]);
+            Assert.Equal("token456", httpProperty.Headers["AppToken"]);
+        }
+
+        [Fact]
+        public void AfterReceiveReply_LogsInformation()
+        {
+            // Arrange
+            var inspector = new MessageInspector(
+                _loggerMock.Object,
+                "appId",
+                "token");
+
+            var reply = Message.CreateMessage(
+                MessageVersion.Soap11,
+                "urn:test");
+
+            object correlationState = null;
+
+            // Act
+            inspector.AfterReceiveReply(ref reply, correlationState);
+
+            // Assert
+            _loggerMock.Verify(
+                x => x.Info(It.Is<string>(s => s.Contains("AfterReceiveReply"))),
                 Times.Once);
         }
 
