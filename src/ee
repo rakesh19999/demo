@@ -1,178 +1,230 @@
-using Xunit;
+using System;
+using Microsoft.Extensions.Logging;
 using Moq;
-using System.Linq;
-using System.ServiceModel;
-using System.ServiceModel.Channels;
-using System.ServiceModel.Description;
-using System.ServiceModel.Dispatcher;
-using Intergraph.Cad.Infrastructure;
-using OnCall.MFRSessionNotificationsModule;
+using Newtonsoft.Json.Linq;
+using Xunit;
 
-namespace OnCall.MFRSessionNotificationsModule.Tests
+public class ApprovalsRequestHandlerTests
 {
-    public class InspectorBehaviorTests
+    private readonly Mock<ILogger> _loggerMock;
+    private readonly Mock<ILocalizedStrings> _localizedStringsMock;
+    private readonly Mock<ISession> _sessionMock;
+    private readonly Mock<IParameterAccess> _parameterAccessMock;
+
+    private readonly ApprovalsRequestHandler _handler;
+
+    public ApprovalsRequestHandlerTests()
     {
-        private readonly Mock<ILogger> _loggerMock;
+        _loggerMock = new Mock<ILogger>();
+        _localizedStringsMock = new Mock<ILocalizedStrings>();
+        _sessionMock = new Mock<ISession>();
+        _parameterAccessMock = new Mock<IParameterAccess>();
 
-        public InspectorBehaviorTests()
+        _handler = new ApprovalsRequestHandler(
+            _loggerMock.Object,
+            _localizedStringsMock.Object,
+            _sessionMock.Object,
+            _parameterAccessMock.Object);
+    }
+
+    // ---------------- HANDLE MESSAGE ----------------
+
+    [Fact]
+    public void HandleMessage_UserIdPresent_ReturnsSuccess()
+    {
+        var header = new MessageHeader { SessionId = "1" };
+        var request = new FRApprovalRequest
         {
-            _loggerMock = new Mock<ILogger>();
-        }
+            ActionType = "StartApproval",
+            Value = JObject.FromObject(new { userId = "testUser" })
+        };
 
-        #region InspectorBehavior tests
+        var response = _handler.HandleMessage(header, request);
 
-        [Fact]
-        public void AddBindingParameters_LogsInformation()
+        Assert.True(response.Response.Success);
+        Assert.True(response.Data.IsSuccess);
+    }
+
+    [Fact]
+    public void HandleMessage_UserIdMissing_FetchesUserName()
+    {
+        var header = new MessageHeader { SessionId = "2" };
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var behavior = new InspectorBehavior(
-                _loggerMock.Object,
-                "appId",
-                "appToken");
+            ActionType = "StartApproval",
+            Value = JObject.FromObject(new { })
+        };
 
-            var endpoint = new ServiceEndpoint(
-                ContractDescription.GetContract(typeof(IDisposable)));
+        var response = _handler.HandleMessage(header, request);
 
-            var bindingParameters = new BindingParameterCollection();
+        Assert.True(response.Response.Success);
+        Assert.NotNull(response.Data);
+    }
 
-            // Act
-            behavior.AddBindingParameters(endpoint, bindingParameters);
-
-            // Assert
-            _loggerMock.Verify(
-                x => x.Info(It.Is<string>(s => s.Contains("AddBindingParameters"))),
-                Times.Once);
-        }
-
-        [Fact]
-        public void ApplyClientBehavior_AddsMessageInspector()
+    [Fact]
+    public void HandleMessage_Exception_ReturnsFailure()
+    {
+        var header = new MessageHeader { SessionId = "3" };
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var behavior = new InspectorBehavior(
-                _loggerMock.Object,
-                "appId",
-                "appToken");
+            ActionType = "StartApproval",
+            Value = null
+        };
 
-            var endpoint = new ServiceEndpoint(
-                ContractDescription.GetContract(typeof(IDisposable)));
+        var response = _handler.HandleMessage(header, request);
 
-            var clientRuntime = new ClientRuntime("test", "contract");
+        Assert.False(response.Response.Success);
+        Assert.NotNull(response.Data.ErrorMessage);
+    }
 
-            // Act
-            behavior.ApplyClientBehavior(endpoint, clientRuntime);
+    // ---------------- INVOKE APPROVAL ACTION ----------------
 
-            // Assert
-            Assert.Single(clientRuntime.ClientMessageInspectors);
-            Assert.IsType<MessageInspector>(
-                clientRuntime.ClientMessageInspectors.First());
-        }
-
-        [Fact]
-        public void ApplyDispatchBehavior_LogsInformation()
+    [Fact]
+    public void InvokeApprovalAction_ValidAction_ReturnsResult()
+    {
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var behavior = new InspectorBehavior(
-                _loggerMock.Object,
-                "appId",
-                "appToken");
+            ActionType = "Complete",
+            Value = JObject.FromObject(new { })
+        };
 
-            var endpoint = new ServiceEndpoint(
-                ContractDescription.GetContract(typeof(IDisposable)));
+        var serviceMock = CreateWebServiceMock();
 
-            var endpointDispatcher = new EndpointDispatcher(
-                new EndpointAddress("http://localhost/test"),
-                "contract",
-                "namespace");
+        var result = _handler.InvokeApprovalAction(request, serviceMock.Object);
 
-            // Act
-            behavior.ApplyDispatchBehavior(endpoint, endpointDispatcher);
+        Assert.NotNull(result);
+    }
 
-            // Assert
-            _loggerMock.Verify(
-                x => x.Info(It.Is<string>(s => s.Contains("ApplyDispatchBehavior"))),
-                Times.Once);
-        }
-
-        [Fact]
-        public void Validate_LogsInformation()
+    [Fact]
+    public void InvokeApprovalAction_InvalidAction_ThrowsWrappedException()
+    {
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var behavior = new InspectorBehavior(
-                _loggerMock.Object,
-                "appId",
-                "appToken");
+            ActionType = "INVALID",
+            Value = JObject.FromObject(new { })
+        };
 
-            var endpoint = new ServiceEndpoint(
-                ContractDescription.GetContract(typeof(IDisposable)));
+        var serviceMock = CreateWebServiceMock();
 
-            // Act
-            behavior.Validate(endpoint);
+        var ex = Assert.Throws<Exception>(() =>
+            _handler.InvokeApprovalAction(request, serviceMock.Object));
 
-            // Assert
-            _loggerMock.Verify(
-                x => x.Info(It.Is<string>(s => s.Contains("Validate"))),
-                Times.Once);
-        }
+        Assert.Contains("Error occured while invoicing approval action", ex.Message);
+    }
 
-        #endregion
+    // ---------------- CONVERT ACTION TYPE ----------------
 
-        #region MessageInspector tests
+    [Theory]
+    [InlineData("StartApproval")]
+    [InlineData("Complete")]
+    [InlineData("Reject")]
+    public void ConvertActionType_ValidEnum_ReturnsEnum(string action)
+    {
+        var request = new FRApprovalRequest { ActionType = action };
 
-        [Fact]
-        public void BeforeSendRequest_AddsHttpHeaders()
+        var result = InvokeConvertAction(request);
+
+        Assert.IsType<ApprovalActions>(result);
+    }
+
+    [Fact]
+    public void ConvertActionType_InvalidEnum_ThrowsException()
+    {
+        var request = new FRApprovalRequest { ActionType = "BAD" };
+
+        var ex = Assert.Throws<Exception>(() => InvokeConvertAction(request));
+
+        Assert.Contains("Invalid action type", ex.Message);
+    }
+
+    // ---------------- EXECUTE ACTION (ALL CASES) ----------------
+
+    [Theory]
+    [InlineData(ApprovalActions.StartApproval)]
+    [InlineData(ApprovalActions.Complete)]
+    [InlineData(ApprovalActions.Reject)]
+    [InlineData(ApprovalActions.Redirect)]
+    [InlineData(ApprovalActions.Unclaim)]
+    [InlineData(ApprovalActions.GetAssignedList)]
+    [InlineData(ApprovalActions.GetAvailableList)]
+    [InlineData(ApprovalActions.GetPendingList)]
+    [InlineData(ApprovalActions.GetCompletedList)]
+    [InlineData(ApprovalActions.GetTabCounts)]
+    public void ExecuteAction_AllCases_ReturnResult(ApprovalActions action)
+    {
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var inspector = new MessageInspector(
-                _loggerMock.Object,
-                "appId123",
-                "token456");
+            Value = JObject.FromObject(new { })
+        };
 
-            var request = Message.CreateMessage(
-                MessageVersion.Soap11,
-                "urn:test");
+        var serviceMock = CreateWebServiceMock();
 
-            var channelMock = new Mock<IClientChannel>();
+        var result = InvokeExecuteAction(request, serviceMock.Object, action);
 
-            // Act
-            inspector.BeforeSendRequest(ref request, channelMock.Object);
+        Assert.NotNull(result);
+    }
 
-            // Assert
-            Assert.True(
-                request.Properties.ContainsKey(HttpRequestMessageProperty.Name));
-
-            var httpProperty =
-                request.Properties[HttpRequestMessageProperty.Name]
-                as HttpRequestMessageProperty;
-
-            Assert.NotNull(httpProperty);
-            Assert.Equal("appId123", httpProperty.Headers["AppID"]);
-            Assert.Equal("token456", httpProperty.Headers["AppToken"]);
-        }
-
-        [Fact]
-        public void AfterReceiveReply_LogsInformation()
+    [Fact]
+    public void ExecuteAction_DefaultCase_ReturnsNull()
+    {
+        var request = new FRApprovalRequest
         {
-            // Arrange
-            var inspector = new MessageInspector(
-                _loggerMock.Object,
-                "appId",
-                "token");
+            Value = JObject.FromObject(new { })
+        };
 
-            var reply = Message.CreateMessage(
-                MessageVersion.Soap11,
-                "urn:test");
+        var serviceMock = CreateWebServiceMock();
 
-            object correlationState = null;
+        var result = InvokeExecuteAction(
+            request,
+            serviceMock.Object,
+            (ApprovalActions)999);
 
-            // Act
-            inspector.AfterReceiveReply(ref reply, correlationState);
+        Assert.Null(result);
+    }
 
-            // Assert
-            _loggerMock.Verify(
-                x => x.Info(It.Is<string>(s => s.Contains("AfterReceiveReply"))),
-                Times.Once);
-        }
+    // ---------------- HELPERS ----------------
 
-        #endregion
+    private Mock<WebRMSApprovalService> CreateWebServiceMock()
+    {
+        var mock = new Mock<WebRMSApprovalService>(
+            _parameterAccessMock.Object,
+            _loggerMock.Object);
+
+        mock.SetupAllProperties();
+        mock.Setup(x => x.StartApproval(It.IsAny<StartApprovalRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.Complete(It.IsAny<CompleteRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.Reject(It.IsAny<RejectRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.Redirect(It.IsAny<RedirectRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.UnClaim(It.IsAny<UnclaimRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.GetAssignedList(It.IsAny<AssignedListRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.GetAvailableList(It.IsAny<AvailableListRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.GetPendingList(It.IsAny<PendingListRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.GetCompletedList(It.IsAny<CompletedListRequestInfo>())).Returns(new object());
+        mock.Setup(x => x.GetTabCounts(It.IsAny<TabCountsRequestInfo>())).Returns(new object());
+
+        return mock;
+    }
+
+    private ApprovalActions InvokeConvertAction(FRApprovalRequest request)
+    {
+        var method = typeof(ApprovalsRequestHandler)
+            .GetMethod("ConvertActionTypeToApprovalActions",
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+
+        return (ApprovalActions)method.Invoke(_handler, new object[] { request });
+    }
+
+    private object InvokeExecuteAction(
+        FRApprovalRequest request,
+        WebRMSApprovalService service,
+        ApprovalActions action)
+    {
+        var method = typeof(ApprovalsRequestHandler)
+            .GetMethod("ExecuteAction",
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+
+        return method.Invoke(_handler, new object[] { request, service, action });
     }
 }
