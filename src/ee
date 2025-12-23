@@ -1,90 +1,199 @@
-using System.Collections.Generic;
 using Xunit;
 using Moq;
+using System;
+using System.Data;
+using Newtonsoft.Json;
+using OnCall.MFRSessionNotificationsModule;
+using Intergraph.Cad.Infrastructure;
+using OnCall.SharedWeb.Database;
 
-public class MappingFacadeTests
+namespace OnCall.MFRSessionNotificationsModule.Tests
 {
-    private readonly MappingFacade _sut;
-
-    public MappingFacadeTests()
+    public class AddonLoginUtilTests
     {
-        var loggerMock = new Mock<ILogger>();
-        _sut = new MappingFacade(loggerMock.Object);
-    }
+        private readonly Mock<ILogger> _loggerMock;
+        private readonly Mock<IDatabaseConnectionFactory> _dbFactoryMock;
+        private readonly Mock<IParameterRepository> _parameterRepoMock;
 
-    [Fact]
-    public void DMUTOMFRPostProcessing_WhenHeightIsSingleDigit_ShouldFormatCorrectly()
-    {
-        // Arrange
-        var request = new AddIncidentRequest
+        private readonly AddonLoginUtil _sut;
+
+        public AddonLoginUtilTests()
         {
-            Names = new List<IncidentName>
-            {
-                new IncidentName { Height = "5\"" }
-            }
-        };
+            _loggerMock = new Mock<ILogger>();
+            _dbFactoryMock = new Mock<IDatabaseConnectionFactory>();
+            _parameterRepoMock = new Mock<IParameterRepository>();
 
-        // Act
-        _sut.DMUTOMFRPostProcessing(request);
+            _sut = new AddonLoginUtil(
+                _loggerMock.Object,
+                _dbFactoryMock.Object,
+                _parameterRepoMock.Object
+            );
+        }
 
-        // Assert
-        Assert.Equal("5'00\"", request.Names[0].Height);
-    }
+        #region getEmployeeCustomQuery
 
-    [Fact]
-    public void DMUTOMFRPostProcessing_WhenHeightHasFeetAndInches_ShouldFormatCorrectly()
-    {
-        // Arrange
-        var request = new AddIncidentRequest
+        [Fact]
+        public void getEmployeeCustomQuery_ReplacesEmployeeRecnum()
         {
-            Names = new List<IncidentName>
-            {
-                new IncidentName { Height = "5'9\"" }
-            }
-        };
+            // Arrange
+            string employeeRecnum = "12345";
+            frLoginAddinConstants.employeeQuery =
+                "select * from employee where recnum = ()";
 
-        // Act
-        _sut.DMUTOMFRPostProcessing(request);
+            // Act
+            var result = _sut.getEmployeeCustomQuery(employeeRecnum);
 
-        // Assert
-        Assert.Equal("5'09\"", request.Names[0].Height);
-    }
+            // Assert
+            Assert.NotNull(result);
+            Assert.Contains(employeeRecnum, result);
+            Assert.DoesNotContain("()", result);
+        }
 
-    [Fact]
-    public void DMUTOMFRPostProcessing_WhenInchesGreaterThan12_ShouldCapAt11()
-    {
-        // Arrange
-        var request = new AddIncidentRequest
+        #endregion
+
+        #region getEmployeeImageFromResponse
+
+        [Fact]
+        public void getEmployeeImageFromResponse_ReturnsImageThumbnail()
         {
-            Names = new List<IncidentName>
+            // Arrange
+            string jsonResponse = @"
             {
-                new IncidentName { Height = "5'15\"" }
-            }
-        };
+                ""results"": [
+                    {
+                        ""RecordAndImage Thumbnail"": {
+                            ""Image Thumbnail"": ""base64-image-data""
+                        }
+                    }
+                ]
+            }";
 
-        // Act
-        _sut.DMUTOMFRPostProcessing(request);
+            // Act
+            var result = _sut.getEmployeeImageFromResponse(jsonResponse);
 
-        // Assert
-        Assert.Equal("5'11\"", request.Names[0].Height);
-    }
+            // Assert
+            Assert.Equal("base64-image-data", result);
+        }
 
-    [Fact]
-    public void DMUTOMFRPostProcessing_WhenHeightIsNull_ShouldNotThrow()
-    {
-        // Arrange
-        var request = new AddIncidentRequest
+        [Fact]
+        public void getEmployeeImageFromResponse_WhenResultsEmpty_ReturnsEmptyString()
         {
-            Names = new List<IncidentName>
-            {
-                new IncidentName { Height = null }
-            }
-        };
+            // Arrange
+            string jsonResponse = @"{ ""results"": [] }";
 
-        // Act & Assert
-        var exception = Record.Exception(() =>
-            _sut.DMUTOMFRPostProcessing(request));
+            // Act
+            var result = _sut.getEmployeeImageFromResponse(jsonResponse);
 
-        Assert.Null(exception);
+            // Assert
+            Assert.Equal(string.Empty, result);
+        }
+
+        #endregion
+
+        #region GetUserName
+
+        [Fact]
+        public void GetUserName_WhenEmployeeExists_ReturnsUserName()
+        {
+            // Arrange
+            var connectionMock = new Mock<IDbConnection>();
+            var commandMock = new Mock<IDbCommand>();
+            var readerMock = new Mock<IDataReader>();
+            var parameterMock = new Mock<IDbDataParameter>();
+
+            _dbFactoryMock
+                .Setup(x => x.CreateRawConnection())
+                .Returns(connectionMock.Object);
+
+            connectionMock
+                .Setup(x => x.CreateCommand())
+                .Returns(commandMock.Object);
+
+            commandMock
+                .Setup(x => x.CreateParameter())
+                .Returns(parameterMock.Object);
+
+            commandMock
+                .Setup(x => x.ExecuteReader())
+                .Returns(readerMock.Object);
+
+            readerMock
+                .SetupSequence(r => r.Read())
+                .Returns(true)
+                .Returns(false);
+
+            readerMock
+                .Setup(r => r.IsDBNull(0))
+                .Returns(false);
+
+            readerMock
+                .Setup(r => r.GetString(0))
+                .Returns("JohnDoe");
+
+            // Act
+            var result = _sut.GetUserName(1001);
+
+            // Assert
+            Assert.Equal("JohnDoe", result);
+        }
+
+        [Fact]
+        public void GetUserName_WhenEmployeeNotFound_ReturnsEmptyString()
+        {
+            // Arrange
+            var connectionMock = new Mock<IDbConnection>();
+            var commandMock = new Mock<IDbCommand>();
+            var readerMock = new Mock<IDataReader>();
+            var parameterMock = new Mock<IDbDataParameter>();
+
+            _dbFactoryMock
+                .Setup(x => x.CreateRawConnection())
+                .Returns(connectionMock.Object);
+
+            connectionMock
+                .Setup(x => x.CreateCommand())
+                .Returns(commandMock.Object);
+
+            commandMock
+                .Setup(x => x.CreateParameter())
+                .Returns(parameterMock.Object);
+
+            commandMock
+                .Setup(x => x.ExecuteReader())
+                .Returns(readerMock.Object);
+
+            readerMock
+                .Setup(r => r.Read())
+                .Returns(false);
+
+            // Act
+            var result = _sut.GetUserName(2002);
+
+            // Assert
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void GetUserName_WhenExceptionThrown_ReturnsNullAndLogsError()
+        {
+            // Arrange
+            _dbFactoryMock
+                .Setup(x => x.CreateRawConnection())
+                .Throws(new Exception("Database failure"));
+
+            // Act
+            var result = _sut.GetUserName(3003);
+
+            // Assert
+            Assert.Null(result);
+
+            _loggerMock.Verify(
+                x => x.Critical(
+                    It.Is<string>(s => s.Contains("GetUserName")),
+                    It.IsAny<Exception>()),
+                Times.Once);
+        }
+
+        #endregion
     }
 }
