@@ -1,230 +1,64 @@
-using System;
-using Microsoft.Extensions.Logging;
-using Moq;
-using Newtonsoft.Json.Linq;
-using Xunit;
-
-public class ApprovalsRequestHandlerTests
+public class IncidentCommandModuleTests
 {
-    private readonly Mock<ILogger> _loggerMock;
-    private readonly Mock<ILocalizedStrings> _localizedStringsMock;
-    private readonly Mock<ISession> _sessionMock;
-    private readonly Mock<IParameterAccess> _parameterAccessMock;
+    private readonly Mock<IWebRestServiceManager> _mockRestService;
+    private readonly Mock<XMLProcessor> _mockXmlProcessor;
+    private readonly ILogger _logger;
+    private readonly IParameterAccess _parameterAccess;
 
-    private readonly ApprovalsRequestHandler _handler;
-
-    public ApprovalsRequestHandlerTests()
+    public IncidentCommandModuleTests()
     {
-        _loggerMock = new Mock<ILogger>();
-        _localizedStringsMock = new Mock<ILocalizedStrings>();
-        _sessionMock = new Mock<ISession>();
-        _parameterAccessMock = new Mock<IParameterAccess>();
-
-        _handler = new ApprovalsRequestHandler(
-            _loggerMock.Object,
-            _localizedStringsMock.Object,
-            _sessionMock.Object,
-            _parameterAccessMock.Object);
-    }
-
-    // ---------------- HANDLE MESSAGE ----------------
-
-    [Fact]
-    public void HandleMessage_UserIdPresent_ReturnsSuccess()
-    {
-        var header = new MessageHeader { SessionId = "1" };
-        var request = new FRApprovalRequest
-        {
-            ActionType = "StartApproval",
-            Value = JObject.FromObject(new { userId = "testUser" })
-        };
-
-        var response = _handler.HandleMessage(header, request);
-
-        Assert.True(response.Response.Success);
-        Assert.True(response.Data.IsSuccess);
+        _mockRestService = new Mock<IWebRestServiceManager>();
+        _mockXmlProcessor = new Mock<XMLProcessor>(_parameterAccess, _logger);
     }
 
     [Fact]
-    public void HandleMessage_UserIdMissing_FetchesUserName()
+    public void Initialize_ShouldSetRabbitMq_WhenServiceReturnsTrue()
     {
-        var header = new MessageHeader { SessionId = "2" };
-        var request = new FRApprovalRequest
-        {
-            ActionType = "StartApproval",
-            Value = JObject.FromObject(new { })
-        };
+        // Arrange
+        _mockRestService.Setup(x => x.checkIsRabbitMQ()).Returns(true);
 
-        var response = _handler.HandleMessage(header, request);
+        var sut = new TestableIncidentCommandModule(
+            baseServices,
+            _logger,
+            _parameterAccess,
+            _mockRestService.Object,
+            _mockXmlProcessor.Object
+        );
 
-        Assert.True(response.Response.Success);
-        Assert.NotNull(response.Data);
+        // Act
+        sut.Initialize();
+
+        // Assert
+        bool isRabbitMq =
+            TestHelper.GetPrivateField<bool>(sut, "isRabbitMq");
+
+        Assert.True(isRabbitMq);
+    }
+}
+
+/* ============================
+   Test-only subclass
+   ============================ */
+internal class TestableIncidentCommandModule : IncidentCommandModule
+{
+    private readonly IWebRestServiceManager _restService;
+    private readonly XMLProcessor _xmlProcessor;
+
+    public TestableIncidentCommandModule(
+        BaseServices baseServices,
+        ILogger logger,
+        IParameterAccess parameterAccess,
+        IWebRestServiceManager restService,
+        XMLProcessor xmlProcessor)
+        : base(baseServices, logger, parameterAccess)
+    {
+        _restService = restService;
+        _xmlProcessor = xmlProcessor;
     }
 
-    [Fact]
-    public void HandleMessage_Exception_ReturnsFailure()
-    {
-        var header = new MessageHeader { SessionId = "3" };
-        var request = new FRApprovalRequest
-        {
-            ActionType = "StartApproval",
-            Value = null
-        };
+    protected override IWebRestServiceManager CreateRestService(string user)
+        => _restService;
 
-        var response = _handler.HandleMessage(header, request);
-
-        Assert.False(response.Response.Success);
-        Assert.NotNull(response.Data.ErrorMessage);
-    }
-
-    // ---------------- INVOKE APPROVAL ACTION ----------------
-
-    [Fact]
-    public void InvokeApprovalAction_ValidAction_ReturnsResult()
-    {
-        var request = new FRApprovalRequest
-        {
-            ActionType = "Complete",
-            Value = JObject.FromObject(new { })
-        };
-
-        var serviceMock = CreateWebServiceMock();
-
-        var result = _handler.InvokeApprovalAction(request, serviceMock.Object);
-
-        Assert.NotNull(result);
-    }
-
-    [Fact]
-    public void InvokeApprovalAction_InvalidAction_ThrowsWrappedException()
-    {
-        var request = new FRApprovalRequest
-        {
-            ActionType = "INVALID",
-            Value = JObject.FromObject(new { })
-        };
-
-        var serviceMock = CreateWebServiceMock();
-
-        var ex = Assert.Throws<Exception>(() =>
-            _handler.InvokeApprovalAction(request, serviceMock.Object));
-
-        Assert.Contains("Error occured while invoicing approval action", ex.Message);
-    }
-
-    // ---------------- CONVERT ACTION TYPE ----------------
-
-    [Theory]
-    [InlineData("StartApproval")]
-    [InlineData("Complete")]
-    [InlineData("Reject")]
-    public void ConvertActionType_ValidEnum_ReturnsEnum(string action)
-    {
-        var request = new FRApprovalRequest { ActionType = action };
-
-        var result = InvokeConvertAction(request);
-
-        Assert.IsType<ApprovalActions>(result);
-    }
-
-    [Fact]
-    public void ConvertActionType_InvalidEnum_ThrowsException()
-    {
-        var request = new FRApprovalRequest { ActionType = "BAD" };
-
-        var ex = Assert.Throws<Exception>(() => InvokeConvertAction(request));
-
-        Assert.Contains("Invalid action type", ex.Message);
-    }
-
-    // ---------------- EXECUTE ACTION (ALL CASES) ----------------
-
-    [Theory]
-    [InlineData(ApprovalActions.StartApproval)]
-    [InlineData(ApprovalActions.Complete)]
-    [InlineData(ApprovalActions.Reject)]
-    [InlineData(ApprovalActions.Redirect)]
-    [InlineData(ApprovalActions.Unclaim)]
-    [InlineData(ApprovalActions.GetAssignedList)]
-    [InlineData(ApprovalActions.GetAvailableList)]
-    [InlineData(ApprovalActions.GetPendingList)]
-    [InlineData(ApprovalActions.GetCompletedList)]
-    [InlineData(ApprovalActions.GetTabCounts)]
-    public void ExecuteAction_AllCases_ReturnResult(ApprovalActions action)
-    {
-        var request = new FRApprovalRequest
-        {
-            Value = JObject.FromObject(new { })
-        };
-
-        var serviceMock = CreateWebServiceMock();
-
-        var result = InvokeExecuteAction(request, serviceMock.Object, action);
-
-        Assert.NotNull(result);
-    }
-
-    [Fact]
-    public void ExecuteAction_DefaultCase_ReturnsNull()
-    {
-        var request = new FRApprovalRequest
-        {
-            Value = JObject.FromObject(new { })
-        };
-
-        var serviceMock = CreateWebServiceMock();
-
-        var result = InvokeExecuteAction(
-            request,
-            serviceMock.Object,
-            (ApprovalActions)999);
-
-        Assert.Null(result);
-    }
-
-    // ---------------- HELPERS ----------------
-
-    private Mock<WebRMSApprovalService> CreateWebServiceMock()
-    {
-        var mock = new Mock<WebRMSApprovalService>(
-            _parameterAccessMock.Object,
-            _loggerMock.Object);
-
-        mock.SetupAllProperties();
-        mock.Setup(x => x.StartApproval(It.IsAny<StartApprovalRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.Complete(It.IsAny<CompleteRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.Reject(It.IsAny<RejectRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.Redirect(It.IsAny<RedirectRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.UnClaim(It.IsAny<UnclaimRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.GetAssignedList(It.IsAny<AssignedListRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.GetAvailableList(It.IsAny<AvailableListRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.GetPendingList(It.IsAny<PendingListRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.GetCompletedList(It.IsAny<CompletedListRequestInfo>())).Returns(new object());
-        mock.Setup(x => x.GetTabCounts(It.IsAny<TabCountsRequestInfo>())).Returns(new object());
-
-        return mock;
-    }
-
-    private ApprovalActions InvokeConvertAction(FRApprovalRequest request)
-    {
-        var method = typeof(ApprovalsRequestHandler)
-            .GetMethod("ConvertActionTypeToApprovalActions",
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
-
-        return (ApprovalActions)method.Invoke(_handler, new object[] { request });
-    }
-
-    private object InvokeExecuteAction(
-        FRApprovalRequest request,
-        WebRMSApprovalService service,
-        ApprovalActions action)
-    {
-        var method = typeof(ApprovalsRequestHandler)
-            .GetMethod("ExecuteAction",
-                System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
-
-        return method.Invoke(_handler, new object[] { request, service, action });
-    }
+    protected override XMLProcessor CreateXmlProcessor()
+        => _xmlProcessor;
 }
