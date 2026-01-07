@@ -1,64 +1,98 @@
-public class IncidentCommandModuleTests
-{
-    private readonly Mock<IWebRestServiceManager> _mockRestService;
-    private readonly Mock<XMLProcessor> _mockXmlProcessor;
-    private readonly ILogger _logger;
-    private readonly IParameterAccess _parameterAccess;
+export const handleArrestBookingConfiguration = (
+  stateInfo: any,
+  sectionType: string | undefined,
+  action: any,
+  propertyKey?: string
+) => {
+  try {
+    // 1️⃣ Resolve section deterministically
+    const sessionSection =
+      getSessionStorageFor(
+        HignHFRStorageConstants.wfrCurrentReportSection
+      )?.trim();
 
-    public IncidentCommandModuleTests()
-    {
-        _mockRestService = new Mock<IWebRestServiceManager>();
-        _mockXmlProcessor = new Mock<XMLProcessor>(_parameterAccess, _logger);
+    const currentSectionType =
+      sectionType?.trim() ||
+      action?.meta?.sectionType?.trim() ||
+      sessionSection;
+
+    if (!currentSectionType) {
+      return stateInfo;
     }
 
-    [Fact]
-    public void Initialize_ShouldSetRabbitMq_WhenServiceReturnsTrue()
-    {
-        // Arrange
-        _mockRestService.Setup(x => x.checkIsRabbitMQ()).Returns(true);
+    // 2️⃣ Safely read sections (DEV may send null)
+    const stateSection = stateInfo?.[currentSectionType] ?? {};
+    const payloadSection = action?.payload?.[currentSectionType] ?? {};
 
-        var sut = new TestableIncidentCommandModule(
-            baseServices,
-            _logger,
-            _parameterAccess,
-            _mockRestService.Object,
-            _mockXmlProcessor.Object
+    // 3️⃣ Compute booking flags ONCE
+    const bookingDisabled = Boolean(isBookingDisabled(action));
+    const bookingButtonDisabled = Boolean(
+      isBookingDisabled(action, true)
+    );
+
+    // 4️⃣ Build updated section (NO DATA LOSS)
+    let updatedSection = {
+      ...stateSection,
+      ...payloadSection,
+      [RequestKeyConstant.isBookingDisabled]: bookingDisabled,
+      [RequestKeyConstant.isBookingButtonDisabled]:
+        bookingButtonDisabled,
+    };
+
+    // 5️⃣ Booking status logic (SAFE + FIXED)
+    if (currentSectionType === RequestKeyConstant.arrestBooking) {
+      const isActive =
+        stateSection?.[RequestKeyConstant.active] ||
+        payloadSection?.[RequestKeyConstant.bookingStatus] ===
+          RequestKeyConstant.activeBooking;
+
+      updatedSection = {
+        ...updatedSection,
+        [RequestKeyConstant.bookingStatus]: isActive
+          ? RequestKeyConstant.activeBooking
+          : RequestKeyConstant.preBooking,
+      };
+    }
+
+    // 6️⃣ DOB → Juvenile logic (GUARDED)
+    if (propertyKey === RequestKeyConstant.dob) {
+      const selectedDate =
+        payloadSection?.[RequestKeyConstant.wfrArresteesNames]?.[
+          RequestKeyConstant.dob
+        ];
+
+      const arrestDate = payloadSection?.arrestDate;
+      const juvenileAge = action?.extraPayload;
+
+      if (selectedDate && arrestDate && juvenileAge != null) {
+        const age = moment(arrestDate).diff(
+          moment(selectedDate),
+          "years"
         );
 
-        // Act
-        sut.Initialize();
-
-        // Assert
-        bool isRabbitMq =
-            TestHelper.GetPrivateField<bool>(sut, "isRabbitMq");
-
-        Assert.True(isRabbitMq);
-    }
-}
-
-/* ============================
-   Test-only subclass
-   ============================ */
-internal class TestableIncidentCommandModule : IncidentCommandModule
-{
-    private readonly IWebRestServiceManager _restService;
-    private readonly XMLProcessor _xmlProcessor;
-
-    public TestableIncidentCommandModule(
-        BaseServices baseServices,
-        ILogger logger,
-        IParameterAccess parameterAccess,
-        IWebRestServiceManager restService,
-        XMLProcessor xmlProcessor)
-        : base(baseServices, logger, parameterAccess)
-    {
-        _restService = restService;
-        _xmlProcessor = xmlProcessor;
+        updatedSection = {
+          ...updatedSection,
+          [RequestKeyConstant.wfrArresteesNames]: {
+            ...updatedSection[
+              RequestKeyConstant.wfrArresteesNames
+            ],
+            [RequestKeyConstant.afrJuvenile]:
+              age < juvenileAge,
+          },
+        };
+      }
     }
 
-    protected override IWebRestServiceManager CreateRestService(string user)
-        => _restService;
-
-    protected override XMLProcessor CreateXmlProcessor()
-        => _xmlProcessor;
-}
+    // 7️⃣ Return final merged state
+    return {
+      ...stateInfo,
+      [currentSectionType]: updatedSection,
+    };
+  } catch (err) {
+    console.error(
+      "Error occurred in handleArrestBookingConfiguration",
+      err
+    );
+    return stateInfo;
+  }
+};
