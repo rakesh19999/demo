@@ -1,312 +1,110 @@
-import moment from "moment";
-import { handleArrestBookingConfiguration } from "./handleArrestBookingConfiguration";
-import {
-  isBookingDisabled,
-  setBookingDetailsDisabled,
-  processBooking,
-} from "./Common";
+export const handleArrestBookingConfiguration = (
+  stateInfo: any,
+  sectionType: any,
+  action: any,
+  propertyKey?: string
+) => {
+  try {
+    const arrestSectionType =
+      getSessionStorageFor(
+        HxgnMFRStorageConstants.frCurrentReportSection
+      )?.storekey;
 
-jest.mock("./Common", () => ({
-  isBookingDisabled: jest.fn(),
-  setBookingDetailsDisabled: jest.fn(),
-  processBooking: jest.fn(),
-}));
+    const currentSectionType = sectionType ?? arrestSectionType;
 
-jest.mock("./storage", () => ({
-  getSessionStorageFor: jest.fn(),
-}));
+    const currentState = stateInfo[currentSectionType] || {};
+    const payloadState = action.payload?.[currentSectionType] || {};
 
-import { getSessionStorageFor } from "./storage";
+    // ✅ Merge instead of replace (prevents data loss)
+    const updatedSection = {
+      ...currentState,
+      ...payloadState,
+    };
 
-describe("handleArrestBookingConfiguration", () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
+    /* ---------------- BOOKING DISABLE LOGIC ---------------- */
 
-  const baseAction = {
-    payload: {},
-    meta: {},
-  };
+    if (isBookingDisabled(action)) {
+      const bookingSections = [
+        'arrestMedical',
+        'arrestBooking',
+        'arrestRelease',
+        'arrestTransport',
+        'arrestNameAtTimeOf',
+      ];
 
-  /* -------------------------------------------------
-   * 1️⃣ No section resolved → return state
-   * ------------------------------------------------- */
-  it("returns state when section cannot be resolved", () => {
-    const state = { test: true };
-
-    const result = handleArrestBookingConfiguration(
-      state,
-      undefined,
-      baseAction
-    );
-
-    expect(result).toBe(state);
-  });
-
-  /* -------------------------------------------------
-   * 2️⃣ Section from argument
-   * ------------------------------------------------- */
-  it("uses sectionType argument", () => {
-    (isBookingDisabled as jest.Mock).mockReturnValue(false);
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(result.arrestBooking).toBeDefined();
-  });
-
-  /* -------------------------------------------------
-   * 3️⃣ Section from action.meta
-   * ------------------------------------------------- */
-  it("uses sectionType from action.meta", () => {
-    (isBookingDisabled as jest.Mock).mockReturnValue(false);
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      undefined,
-      {
-        payload: { arrestBooking: {} },
-        meta: { sectionType: RequestKeyConstant.arrestBooking },
+      if (
+        action.payload?.[currentSectionType] &&
+        bookingSections.includes(currentSectionType)
+      ) {
+        updatedSection[RequestKeyConstant.isBookingDisabled] = true;
       }
-    );
+    } else if (updatedSection) {
+      updatedSection[RequestKeyConstant.isBookingDisabled] = false;
+    }
 
-    expect(result.arrestBooking).toBeDefined();
-  });
+    /* ---------------- BOOKING BUTTON DISABLE ---------------- */
 
-  /* -------------------------------------------------
-   * 4️⃣ Section from sessionStorage
-   * ------------------------------------------------- */
-  it("uses sectionType from sessionStorage", () => {
-    (getSessionStorageFor as jest.Mock).mockReturnValue(
-      RequestKeyConstant.arrestBooking
-    );
+    if (isBookingDisabled(action, true)) {
+      updatedSection[RequestKeyConstant.isBookingButtonDisabled] = true;
+    }
 
-    const result = handleArrestBookingConfiguration(
-      {},
-      undefined,
-      { payload: { arrestBooking: {} } }
-    );
+    /* ---------------- BOOKING STATUS ---------------- */
 
-    expect(result.arrestBooking).toBeDefined();
-  });
+    if (currentSectionType === RequestKeyConstant.arrestBooking) {
+      updatedSection[RequestKeyConstant.bookingStatus] =
+        stateInfo[currentSectionType]?.[RequestKeyConstant.active] ||
+        updatedSection[RequestKeyConstant.bookingStatus] ===
+          RequestKeyConstant.activeBooking
+          ? RequestKeyConstant.activeBooking
+          : RequestKeyConstant.preBooking;
 
-  /* -------------------------------------------------
-   * 5️⃣ Booking disabled = true
-   * ------------------------------------------------- */
-  it("sets isBookingDisabled = true", () => {
-    (isBookingDisabled as jest.Mock).mockReturnValue(true);
+      // ❗ Logic preserved
+      processBooking(action, stateInfo, currentSectionType);
+    }
 
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
+    /* ---------------- BOOKING DETAILS DISABLE ---------------- */
 
-    expect(
-      result.arrestBooking.isBookingDisabled
-    ).toBe(true);
-  });
-
-  /* -------------------------------------------------
-   * 6️⃣ Booking button disabled
-   * ------------------------------------------------- */
-  it("sets isBookingButtonDisabled", () => {
-    (isBookingDisabled as jest.Mock)
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(
-      result.arrestBooking.isBookingButtonDisabled
-    ).toBe(true);
-  });
-
-  /* -------------------------------------------------
-   * 7️⃣ arrestBooking → activeBooking
-   * ------------------------------------------------- */
-  it("sets bookingStatus = activeBooking", () => {
-    const state = {
-      arrestBooking: {
-        active: true,
-      },
-    };
-
-    const result = handleArrestBookingConfiguration(
-      state,
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(
-      result.arrestBooking.bookingStatus
-    ).toBe(RequestKeyConstant.activeBooking);
-  });
-
-  /* -------------------------------------------------
-   * 8️⃣ arrestBooking → preBooking
-   * ------------------------------------------------- */
-  it("sets bookingStatus = preBooking", () => {
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(
-      result.arrestBooking.bookingStatus
-    ).toBe(RequestKeyConstant.preBooking);
-  });
-
-  /* -------------------------------------------------
-   * 9️⃣ DEV payload null safety
-   * ------------------------------------------------- */
-  it("handles null payload safely", () => {
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: null }
-    );
-
-    expect(result.arrestBooking).toBeDefined();
-  });
-
-  /* -------------------------------------------------
-   * 🔟 processBooking merge
-   * ------------------------------------------------- */
-  it("merges processBooking result", () => {
-    (processBooking as jest.Mock).mockReturnValue({
-      arrestBooking: { processed: true },
-    });
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(result.arrestBooking.processed).toBe(true);
-  });
-
-  /* -------------------------------------------------
-   * 1️⃣1️⃣ setBookingDetailsDisabled called
-   * ------------------------------------------------- */
-  it("calls setBookingDetailsDisabled", () => {
-    handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(setBookingDetailsDisabled).toHaveBeenCalled();
-  });
-
-  /* -------------------------------------------------
-   * 1️⃣2️⃣ DOB → juvenile true
-   * ------------------------------------------------- */
-  it("sets juvenile = true when age < limit", () => {
-    const action = {
-      payload: {
-        arrestBooking: {
-          arrestDate: "2024-02-01",
-          wfrArresteesNames: { dob: "2010-01-01" },
-        },
-      },
-      extraPayload: 18,
-    };
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
+    setBookingDetailsDisabled(
       action,
-      RequestKeyConstant.dob
+      HxgnMFRStorageConstants.frSingleSection
     );
 
-    expect(
-      result.arrestBooking.wfrArresteesNames.afrJuvenile
-    ).toBe(true);
-  });
+    /* ---------------- JUVENILE LOGIC (DOB) ---------------- */
 
-  /* -------------------------------------------------
-   * 1️⃣3️⃣ DOB → juvenile false
-   * ------------------------------------------------- */
-  it("sets juvenile = false when age >= limit", () => {
-    const action = {
-      payload: {
-        arrestBooking: {
-          arrestDate: "2024-02-01",
-          wfrArresteesNames: { dob: "1990-01-01" },
-        },
-      },
-      extraPayload: 18,
+    if (propertyKey === RequestKeyConstant.dob) {
+      const selectedDate =
+        updatedSection?.[RequestKeyConstant.mfrArresteeNames]?.[
+          RequestKeyConstant.dob
+        ];
+
+      const juvenileAge = action.extraPayload;
+      const arrestDate = updatedSection?.arrestDate;
+
+      if (selectedDate && arrestDate) {
+        const personAge = moment(arrestDate).diff(
+          moment(selectedDate),
+          'years'
+        );
+
+        updatedSection[RequestKeyConstant.mfrArresteeNames] = {
+          ...updatedSection[RequestKeyConstant.mfrArresteeNames],
+          [RequestKeyConstant.afrJuvenile]:
+            personAge < juvenileAge,
+        };
+      }
+    }
+
+    /* ---------------- FINAL SAFE RETURN ---------------- */
+
+    return {
+      ...stateInfo,
+      [currentSectionType]: updatedSection,
     };
-
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      action,
-      RequestKeyConstant.dob
+  } catch (err) {
+    console.error(
+      'Error occured while executing method: handleArrestBookingConfiguration',
+      err
     );
-
-    expect(
-      result.arrestBooking.wfrArresteesNames.afrJuvenile
-    ).toBe(false);
-  });
-
-  /* -------------------------------------------------
-   * 1️⃣4️⃣ Missing DOB/arrestDate safe
-   * ------------------------------------------------- */
-  it("does not crash when DOB data missing", () => {
-    const result = handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } },
-      RequestKeyConstant.dob
-    );
-
-    expect(result.arrestBooking).toBeDefined();
-  });
-
-  /* -------------------------------------------------
-   * 1️⃣5️⃣ No mutation of action.payload
-   * ------------------------------------------------- */
-  it("does not mutate action.payload", () => {
-    const action = {
-      payload: { arrestBooking: {} },
-    };
-
-    handleArrestBookingConfiguration(
-      {},
-      RequestKeyConstant.arrestBooking,
-      action
-    );
-
-    expect(action.payload.arrestBooking).toEqual({});
-  });
-
-  /* -------------------------------------------------
-   * 1️⃣6️⃣ Error handling
-   * ------------------------------------------------- */
-  it("returns state on exception", () => {
-    (isBookingDisabled as jest.Mock).mockImplementation(() => {
-      throw new Error("boom");
-    });
-
-    const state = { safe: true };
-
-    const result = handleArrestBookingConfiguration(
-      state,
-      RequestKeyConstant.arrestBooking,
-      { payload: { arrestBooking: {} } }
-    );
-
-    expect(result).toBe(state);
-  });
-});
+    return stateInfo;
+  }
+};
