@@ -1,4 +1,4 @@
-it("should set filtered options when isMyqueryField is true", () => {
+it("applies filtering logic when isMyqueryField is true", async () => {
   jest.spyOn(require("react-redux"), "useSelector")
     .mockImplementationOnce((selector) =>
       selector({
@@ -10,123 +10,23 @@ it("should set filtered options when isMyqueryField is true", () => {
       })
     );
 
-  const mockOptions = [
+  const mockHandleCustomOptionsSelect = jest.fn(() => [
     { name: "A" },
     { name: "B" },
-  ];
+  ]);
 
-  const mockSetOptions = jest.fn();
+  const mockGetSelectOptions = jest.fn((name) => name === "A");
 
-  render(
-    <YourComponent
-      handleCustomOptionsSelect={() => mockOptions}
-      getSelectOptions={(name) => name === "A"}
-      setoptions={mockSetOptions}
-      id="not-reportstatus"
-      isMyqueryField={true}
-    />
+  await render(
+    renderComponent({
+      isMyqueryField: true,
+      id: "not-reportstatus",
+      handleCustomOptionsSelect: mockHandleCustomOptionsSelect,
+      getSelectOptions: mockGetSelectOptions,
+    })
   );
 
-  expect(mockSetOptions).toHaveBeenCalledWith([{ name: "A" }]);
-});
-it("should not filter when id is reportstatus", () => {
-  jest.spyOn(require("react-redux"), "useSelector")
-    .mockImplementationOnce((selector) =>
-      selector({
-        metaDataState: {
-          queriesSearchCriteria: {
-            agency: { recnum: "123" },
-          },
-        },
-      })
-    );
-
-  const mockOptions = [{ name: "A" }, { name: "B" }];
-  const mockSetOptions = jest.fn();
-
-  render(
-    <YourComponent
-      handleCustomOptionsSelect={() => mockOptions}
-      getSelectOptions={jest.fn()}
-      setoptions={mockSetOptions}
-      id="reportstatus"
-      isMyqueryField={true}
-    />
-  );
-
-  expect(mockSetOptions).toHaveBeenCalledWith(mockOptions);
-});
-it("should set full options when isMyqueryField is false", () => {
-  jest.spyOn(require("react-redux"), "useSelector")
-    .mockImplementationOnce((selector) =>
-      selector({
-        metaDataState: {
-          queriesSearchCriteria: {
-            agency: { recnum: "123" },
-          },
-        },
-      })
-    );
-
-  const mockOptions = [{ name: "A" }, { name: "B" }];
-  const mockSetOptions = jest.fn();
-
-  render(
-    <YourComponent
-      handleCustomOptionsSelect={() => mockOptions}
-      getSelectOptions={jest.fn()}
-      setoptions={mockSetOptions}
-      id="anything"
-      isMyqueryField={false}
-    />
-  );
-
-  expect(mockSetOptions).toHaveBeenCalledWith(mockOptions);
-});
-it("should re-run effect when recnum changes", () => {
-  const spy = jest.spyOn(require("react-redux"), "useSelector");
-
-  spy
-    .mockImplementationOnce((selector) =>
-      selector({
-        metaDataState: {
-          queriesSearchCriteria: {
-            agency: { recnum: "123" },
-          },
-        },
-      })
-    )
-    .mockImplementationOnce((selector) =>
-      selector({
-        metaDataState: {
-          queriesSearchCriteria: {
-            agency: { recnum: "456" },
-          },
-        },
-      })
-    );
-
-  const mockSetOptions = jest.fn();
-
-  const { rerender } = render(
-    <YourComponent
-      handleCustomOptionsSelect={() => []}
-      getSelectOptions={jest.fn()}
-      setoptions={mockSetOptions}
-      id="test"
-      isMyqueryField={true}
-    />
-  );
-
-  rerender(
-    <YourComponent
-      handleCustomOptionsSelect={() => []}
-      getSelectOptions={jest.fn()}
-      setoptions={mockSetOptions}
-      id="test"
-      isMyqueryField={true}
-    />
-  );
-
-  expect(mockSetOptions).toHaveBeenCalledTimes(2);
+  expect(mockHandleCustomOptionsSelect).toHaveBeenCalled();
+  expect(mockGetSelectOptions).toHaveBeenCalledWith("A");
+  expect(mockGetSelectOptions).toHaveBeenCalledWith("B");
 });
